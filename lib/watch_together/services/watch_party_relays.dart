@@ -53,9 +53,18 @@ const double maxRoomRate = 2.0;
 
 /// [input] as a room code (separators dropped, letters upper-cased), or null
 /// when it isn't 6 symbols of the code alphabet.
+final _uuidPattern = RegExp(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}');
+final _hex8Pattern = RegExp(r'^[0-9a-fA-F]{8}$');
+
+bool isUburoomRoomCode(String code) => _uuidPattern.hasMatch(code) || _hex8Pattern.hasMatch(code);
+
 String? normalizeRoomCode(String input) {
+  final trimmed = input.trim();
+  final uuidMatch = _uuidPattern.firstMatch(trimmed);
+  if (uuidMatch != null) return uuidMatch.group(0)!.toLowerCase();
+  if (_hex8Pattern.hasMatch(trimmed)) return trimmed.toLowerCase();
   try {
-    return owp.formatCode(input).replaceAll('-', '');
+    return owp.formatCode(trimmed).replaceAll('-', '');
   } on owp.PartyException {
     return null;
   }

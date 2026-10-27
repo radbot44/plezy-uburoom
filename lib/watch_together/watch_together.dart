@@ -3,7 +3,11 @@ export 'models/watch_copy.dart';
 export 'models/watch_notice.dart';
 
 // Services
+export 'services/clock_sync.dart';
+export 'services/guest_playback_reconciler.dart';
 export 'services/player_adapter.dart';
+export 'services/uburoom_auth_service.dart';
+export 'services/uburoom_socket_service.dart';
 export 'services/watch_party_relays.dart';
 
 // Providers

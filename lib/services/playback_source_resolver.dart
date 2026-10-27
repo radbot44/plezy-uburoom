@@ -22,9 +22,32 @@ class PlaybackSourceResolver {
     PlaybackInitializationOptions options, {
     required bool offlineLibraryMode,
     bool downloadOutranksQuality = false,
+    bool suppressServerReporting = false,
   }) async {
     final metadata = options.metadata;
-    final reportingClient = _playbackClient(serverIdOrNull(metadata.serverId), offlineLibraryMode: offlineLibraryMode);
+    final uburoomUrl = metadata.raw?['uburoomMediaUrl'] as String?;
+    if (uburoomUrl != null) {
+      final headers = (metadata.raw?['uburoomHeaders'] as Map<dynamic, dynamic>?)?.map(
+        (k, v) => MapEntry(k.toString(), v.toString()),
+      );
+      final result = PlaybackInitializationResult(
+        availableVersions: const [],
+        videoUrl: uburoomUrl,
+        isOffline: false,
+        isTranscoding: false,
+      );
+      return PlaybackContext(
+        metadata: metadata,
+        result: result,
+        sourceKind: PlaybackSourceKind.remoteDirect,
+        reportingMode: PlaybackReportingMode.disabled,
+        reportingClient: null,
+        streamHeaders: headers,
+      );
+    }
+    final reportingClient = suppressServerReporting
+        ? null
+        : _playbackClient(serverIdOrNull(metadata.serverId), offlineLibraryMode: offlineLibraryMode);
     final service = PlaybackInitializationService(client: reportingClient, database: database);
     final result = await service.getPlaybackData(
       options,
@@ -37,11 +60,9 @@ class PlaybackSourceResolver {
         : result.isTranscoding
         ? PlaybackSourceKind.remoteTranscode
         : PlaybackSourceKind.remoteDirect;
-    final reportingMode = _reportingMode(
-      sourceKind: sourceKind,
-      client: reportingClient,
-      offlineLibraryMode: offlineLibraryMode,
-    );
+    final reportingMode = suppressServerReporting
+        ? PlaybackReportingMode.disabled
+        : _reportingMode(sourceKind: sourceKind, client: reportingClient, offlineLibraryMode: offlineLibraryMode);
     return PlaybackContext(
       metadata: metadata,
       result: result,

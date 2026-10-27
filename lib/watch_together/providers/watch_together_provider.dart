@@ -5,7 +5,9 @@ import 'package:flutter/foundation.dart';
 import 'package:openwatchparty/openwatchparty.dart' as owp;
 import 'package:package_info_plus/package_info_plus.dart';
 
+import '../../media/media_backend.dart';
 import '../../media/media_item.dart';
+import '../../media/media_kind.dart';
 import '../../media/media_server_client.dart';
 import '../../media/media_version.dart';
 import '../../media/title_copies.dart';
@@ -20,6 +22,12 @@ import '../services/media_descriptor.dart';
 import '../services/player_adapter.dart';
 import '../services/recent_rooms_service.dart';
 import '../services/watch_party_relays.dart';
+import 'dart:math' as math;
+import 'package:uuid/uuid.dart';
+import '../services/clock_sync.dart';
+import '../services/guest_playback_reconciler.dart';
+import '../services/uburoom_auth_service.dart';
+import '../services/uburoom_socket_service.dart';
 
 typedef WatchPartyFactory =
     owp.WatchParty<WatchCopy> Function({
@@ -61,6 +69,10 @@ class WatchTogetherProvider extends ChangeNotifier {
     String? Function()? customRelayBaseUrl,
     Future<String> Function()? clientName,
     WatchPartyFactory? partyFactory,
+    ClockSync? clockSync,
+    UburoomSocketService? socketService,
+    UburoomAuthService? authService,
+    String? viewerId,
     this.shareDurationWait = const Duration(seconds: 30),
   }) : _clientFor = clientFor ?? _noClient,
        _displayName = displayName ?? _defaultName,
@@ -68,6 +80,10 @@ class WatchTogetherProvider extends ChangeNotifier {
        _customRelayBaseUrl = customRelayBaseUrl ?? _relaySetting,
        _clientName = clientName ?? _plezyClientName,
        _partyFactory = partyFactory ?? _defaultParty,
+       _clockSync = clockSync ?? ClockSync(),
+       _socketService = socketService,
+       _authService = authService ?? UburoomAuthService(),
+       _viewerId = viewerId ?? const Uuid().v4(),
        _resolver = LibraryResolver(clientFor: clientFor ?? _noClient, findCopies: findCopies ?? _noCopies);
 
   static MediaServerClient? _noClient(String serverId) => null;
@@ -92,6 +108,21 @@ class WatchTogetherProvider extends ChangeNotifier {
   /// How long a host's share waits for the player's length.
   final Duration shareDurationWait;
   final LibraryResolver _resolver;
+  final ClockSync _clockSync;
+  UburoomSocketService? _socketService;
+  final UburoomAuthService _authService;
+  final String _viewerId;
+  GuestPlaybackReconciler? _uburoomReconciler;
+  String? _uburoomRoomId;
+  String? _uburoomServerUrl;
+  String? _uburoomToken;
+  String? _uburoomEpoch;
+  Map<String, dynamic>? _lastUburoomSnapshot;
+  StreamSubscription? _uburoomStateSub;
+  StreamSubscription? _uburoomConnSub;
+  StreamSubscription? _uburoomKickSub;
+
+  bool get isUburoomSession => _uburoomRoomId != null;
 
   owp.WatchParty<WatchCopy>? _party;
   StreamSubscription<owp.PartyState<WatchCopy>>? _stateSubscription;
@@ -169,6 +200,9 @@ class WatchTogetherProvider extends ChangeNotifier {
   /// The room drives [adapter]: it is the attached player and has the room's
   /// file open.
   bool follows(PlezyPlayerAdapter adapter) {
+    if (isUburoomSession) {
+      return isConnected && _attached && identical(_player?.adapter, adapter);
+    }
     final choice = _state.choice;
     final match = _state.match?.state;
     return isConnected &&
@@ -243,6 +277,9 @@ class WatchTogetherProvider extends ChangeNotifier {
   /// Creates a room and joins it as host; returns its code. Throws
   /// [owp.PartyException] with the SDK's code when it fails.
   Future<String> createRoom() async {
+    if (_authService.serverUrl != null) {
+      return await _createUburoomRoom();
+    }
     final party = await _newParty();
     final code = await party.create();
     await _rememberRoom(code);
@@ -256,6 +293,10 @@ class WatchTogetherProvider extends ChangeNotifier {
   /// code when it fails.
   Future<void> joinRoom(String code, {bool create = false}) async {
     final normalized = normalizeRoomCode(code);
+    if (normalized != null && (isUburoomRoomCode(normalized) || _authService.serverUrl != null)) {
+      await _joinUburoomRoom(normalized, create: create);
+      return;
+    }
     if (normalized == null) throw const owp.PartyException(owp.ErrorCode.invalidCode, 'not a room code');
     final party = await _newParty();
     await party.join(normalized, create: create);
@@ -281,10 +322,40 @@ class WatchTogetherProvider extends ChangeNotifier {
   }
 
   /// Leaves the room, or cancels a create or join under way.
-  void leave() => _party?.leave();
+  void leave() {
+    if (isUburoomSession) {
+      final roomId = _uburoomRoomId;
+      final socket = _socketService;
+      _uburoomReconciler?.dispose();
+      _uburoomReconciler = null;
+      if (roomId != null && socket != null && socket.isConnected) {
+        unawaited(socket.sendRequest('/api/watch/rooms/$roomId/leave', {'viewerId': _viewerId}));
+      }
+      _uburoomRoomId = null;
+      _uburoomServerUrl = null;
+      _uburoomToken = null;
+      _uburoomEpoch = null;
+      _attached = false;
+      _state = const owp.PartyState.initial();
+      notifyListeners();
+      return;
+    }
+    _party?.leave();
+  }
 
   /// Host: ends the room for everyone.
-  void endRoom() => _guard(() => _party?.end());
+  void endRoom() {
+    if (isUburoomSession) {
+      final roomId = _uburoomRoomId;
+      final socket = _socketService;
+      if (roomId != null && socket != null && socket.isConnected) {
+        unawaited(socket.sendRequest('/api/watch/rooms/$roomId/close', {'epoch': _state.room?.epoch ?? 1}));
+      }
+      leave();
+      return;
+    }
+    _guard(() => _party?.end());
+  }
 
   void setControl(owp.Control mode) => _guard(() => _party?.setControl(mode));
   void transferHost(String peerId) => _guard(() => _party?.transferHost(peerId));
@@ -292,7 +363,13 @@ class WatchTogetherProvider extends ChangeNotifier {
   void setLocked(bool locked) => _guard(() => _party?.lock(locked));
 
   /// Host: stops the media for everyone.
-  void stopMedia() => _guard(() => _party?.clearMedia());
+  void stopMedia() {
+    if (isUburoomSession) {
+      unawaited(_sendUburoomCommand('media.stop'));
+      return;
+    }
+    _guard(() => _party?.clearMedia());
+  }
 
   void _guard(void Function() command) {
     try {
@@ -341,7 +418,7 @@ class WatchTogetherProvider extends ChangeNotifier {
   // Playback presses. Each returns true when the room took it: the screen must
   // then leave the player alone, since the party commands it.
 
-  bool _routes() => isFollowing && _party != null;
+  bool _routes() => isFollowing && (isUburoomSession || _party != null);
 
   bool _refuseWithoutControl() {
     if (canControl) return false;
@@ -359,6 +436,10 @@ class WatchTogetherProvider extends ChangeNotifier {
       return false;
     }
     if (_refuseWithoutControl()) return true;
+    if (isUburoomSession) {
+      unawaited(_sendUburoomCommand('media.play'));
+      return true;
+    }
     _guard(() => _party!.play());
     return true;
   }
@@ -382,6 +463,10 @@ class WatchTogetherProvider extends ChangeNotifier {
   bool pause() {
     if (!_routes()) return false;
     if (_refuseWithoutControl()) return true;
+    if (isUburoomSession) {
+      unawaited(_sendUburoomCommand('media.pause'));
+      return true;
+    }
     _guard(() => _party!.pause());
     return true;
   }
@@ -390,6 +475,14 @@ class WatchTogetherProvider extends ChangeNotifier {
   bool seek(Duration position) {
     if (!_routes()) return false;
     if (_refuseWithoutControl()) return true;
+    if (isUburoomSession) {
+      unawaited(
+        _sendUburoomCommand('media.seek.absolute', {
+          'position': position.inMilliseconds < 0 ? 0 : position.inMilliseconds,
+        }),
+      );
+      return true;
+    }
     _guard(() => _party!.seek(position.inMilliseconds < 0 ? 0 : position.inMilliseconds));
     return true;
   }
@@ -397,6 +490,10 @@ class WatchTogetherProvider extends ChangeNotifier {
   bool setRate(double rate) {
     if (!_routes()) return false;
     if (_refuseWithoutControl()) return true;
+    if (isUburoomSession) {
+      unawaited(_sendUburoomCommand('media.rate', {'rate': rate.clamp(minRoomRate, maxRoomRate)}));
+      return true;
+    }
     _guard(() => _party!.setRate(rate.clamp(minRoomRate, maxRoomRate)));
     return true;
   }
@@ -414,6 +511,27 @@ class WatchTogetherProvider extends ChangeNotifier {
   /// The screen registered as the player, for tests.
   @visibleForTesting
   Object? get debugPlayerOwner => _playerHooksOwner;
+
+  /// For tests: inspects the stored raw Uburoom epoch.
+  @visibleForTesting
+  String? get debugUburoomEpoch => _uburoomEpoch;
+
+  /// For tests: manually sets Uburoom session parameters.
+  @visibleForTesting
+  void setUburoomSessionForTest({required String roomId, required String serverUrl, required String token}) {
+    _uburoomRoomId = roomId;
+    _uburoomServerUrl = serverUrl;
+    _uburoomToken = token;
+  }
+
+  /// For tests: pushes a snapshot through the Uburoom handler.
+  @visibleForTesting
+  void handleUburoomSnapshotForTest(Map<String, dynamic> snapshot) => _handleUburoomSnapshot(snapshot);
+
+  /// For tests: sends an Uburoom command.
+  @visibleForTesting
+  Future<void> sendUburoomCommandForTest(String action, [Map<String, dynamic>? args]) =>
+      _sendUburoomCommand(action, args);
 
   /// An open player screen registers how the room switches it to another file
   /// and closes it. Replaces any earlier registration.
@@ -439,6 +557,27 @@ class WatchTogetherProvider extends ChangeNotifier {
     final previous = _player?.adapter;
     if (previous != null && !identical(previous, adapter)) previous.release();
     _player = (adapter: adapter, shareable: shareable);
+    if (isUburoomSession) {
+      if (_uburoomReconciler != null && !identical(_uburoomReconciler!.adapter, adapter)) {
+        _uburoomReconciler?.dispose();
+        _uburoomReconciler = null;
+      }
+      if (!_isAway && _socketService != null && _uburoomRoomId != null) {
+        _uburoomReconciler = GuestPlaybackReconciler(
+          adapter: adapter,
+          clockSync: _clockSync,
+          socketService: _socketService!,
+          roomId: _uburoomRoomId!,
+          viewerId: _viewerId,
+        );
+        if (_lastUburoomSnapshot != null) {
+          _uburoomReconciler!.updateRoomSnapshot(_lastUburoomSnapshot!);
+        }
+        _attached = true;
+      }
+      notifyListeners();
+      return;
+    }
     final party = _party;
     if (party == null || _isAway) return;
     final copy = adapter.copy;
@@ -485,8 +624,20 @@ class WatchTogetherProvider extends ChangeNotifier {
     adapter.release();
     if (!identical(_player?.adapter, adapter)) return Future.value();
     _player = null;
+    _uburoomReconciler?.dispose();
+    _uburoomReconciler = null;
+    unawaited(_uburoomStateSub?.cancel());
+    unawaited(_uburoomConnSub?.cancel());
+    unawaited(_uburoomKickSub?.cancel());
+    _socketService?.dispose();
     _attached = false;
     _playBlocked = false;
+    if (isUburoomSession) {
+      _uburoomReconciler?.dispose();
+      _uburoomReconciler = null;
+      notifyListeners();
+      return Future.value();
+    }
     final party = _party;
     if (party == null) return Future.value();
     if (!continuing && isConnected && isHost && _state.choice?.ref == adapter.copy && _state.choice?.id == '') {
@@ -678,6 +829,16 @@ class WatchTogetherProvider extends ChangeNotifier {
   }
 
   Future<void> _closeParty() async {
+    _uburoomReconciler?.dispose();
+    _uburoomReconciler = null;
+    unawaited(_uburoomStateSub?.cancel());
+    unawaited(_uburoomKickSub?.cancel());
+    _uburoomStateSub = null;
+    _uburoomKickSub = null;
+    _uburoomRoomId = null;
+    _uburoomServerUrl = null;
+    _uburoomToken = null;
+    _uburoomEpoch = null;
     final party = _party;
     if (party == null) return;
     _party = null;
@@ -697,6 +858,7 @@ class WatchTogetherProvider extends ChangeNotifier {
   /// Batches the notifications of one turn (a room snapshot often changes
   /// several things at once) into one rebuild, and keeps a player screen's
   /// dispose, which reports its release here, from rebuilding a locked tree.
+
   @override
   void notifyListeners() {
     if (_disposed || _notifyScheduled) return;
@@ -707,11 +869,267 @@ class WatchTogetherProvider extends ChangeNotifier {
     });
   }
 
+  Future<void> _sendUburoomCommand(String action, [Map<String, dynamic>? args]) async {
+    final roomId = _uburoomRoomId;
+    final socket = _socketService;
+    if (roomId == null || socket == null || !socket.isConnected) return;
+    try {
+      await socket.sendRequest('/api/watch/rooms/$roomId/command', {
+        'epoch': _uburoomEpoch ?? (_state.room?.epoch.toString() ?? ''),
+        'expiresAt': _clockSync.serverNow + 2500,
+        'viewerId': _viewerId,
+        'command': {'action': action, 'args': ?args},
+      });
+    } catch (e) {
+      appLogger.w('WatchTogether: uburoom command $action failed: $e');
+    }
+  }
+
+  Future<String> _createUburoomRoom() async {
+    await _closeParty();
+
+    final serverUrl = _authService.serverUrl;
+    final token = await _authService.getToken();
+    if (serverUrl == null || token == null) {
+      throw const owp.PartyException(
+        owp.ErrorCode.invalidCode,
+        'Uburoom credentials missing; sign in to Uburoom first',
+      );
+    }
+
+    var socket = _socketService;
+    if (socket == null || !socket.isConnected) {
+      socket ??= UburoomSocketService(clockSync: _clockSync);
+      _socketService = socket;
+      await socket.connect(serverUrl: serverUrl, token: token);
+    }
+
+    final name = _sanitizedName(_displayName());
+    final res = await socket.sendRequest('/api/rooms', {'name': name});
+    if (!res.isSuccess) {
+      final errMsg = (res.value is Map) ? res.value['error']?.toString() : null;
+      throw owp.PartyException(owp.ErrorCode.invalidCode, errMsg ?? 'Failed to create uburoom room');
+    }
+
+    final String roomId = (res.value is Map) ? (res.value['id'] as String? ?? '') : '';
+    if (roomId.isEmpty) {
+      throw const owp.PartyException(owp.ErrorCode.invalidCode, 'Invalid room returned from uburoom');
+    }
+
+    await _joinUburoomRoom(roomId, create: true);
+    return roomId;
+  }
+
+  Future<void> _joinUburoomRoom(String roomId, {bool create = false}) async {
+    await _closeParty();
+
+    final serverUrl = _authService.serverUrl;
+    final token = await _authService.getToken();
+    if (serverUrl == null || token == null) {
+      throw const owp.PartyException(
+        owp.ErrorCode.invalidCode,
+        'Uburoom credentials missing; sign in to Uburoom first',
+      );
+    }
+
+    var socket = _socketService;
+    if (socket == null || !socket.isConnected) {
+      socket ??= UburoomSocketService(clockSync: _clockSync);
+      _socketService = socket;
+      await socket.connect(serverUrl: serverUrl, token: token);
+    }
+
+    unawaited(_uburoomStateSub?.cancel());
+    _uburoomStateSub = socket.roomStateStream.listen(_onUburoomStatePush);
+    unawaited(_uburoomKickSub?.cancel());
+    _uburoomKickSub = socket.roomKickedStream.listen(_onUburoomRoomKicked);
+
+    final delivery = (_player != null) ? 'local' : 'auto';
+    final res = await socket.sendRequest('/api/watch/rooms/$roomId?viewer=$_viewerId&quality=auto&delivery=$delivery');
+    if (!res.isSuccess) {
+      final errMsg = (res.value is Map) ? res.value['error']?.toString() : null;
+      throw owp.PartyException(owp.ErrorCode.invalidCode, errMsg ?? 'Failed to join uburoom room');
+    }
+
+    _uburoomRoomId = roomId;
+    _uburoomServerUrl = serverUrl;
+    _uburoomToken = token;
+    await _rememberRoom(roomId);
+
+    final snapshot = res.value as Map<String, dynamic>;
+    _handleUburoomSnapshot(snapshot);
+
+    final player = _player;
+    if (player != null && !_isAway) {
+      _uburoomReconciler?.dispose();
+      _uburoomReconciler = GuestPlaybackReconciler(
+        adapter: player.adapter,
+        clockSync: _clockSync,
+        socketService: socket,
+        roomId: roomId,
+        viewerId: _viewerId,
+      );
+      _uburoomReconciler!.updateRoomSnapshot(snapshot);
+      _attached = true;
+    }
+
+    notifyListeners();
+  }
+
+  void _onUburoomStatePush(UburoomRoomStatePush push) {
+    if (_disposed || !isUburoomSession) return;
+    if (push.path.startsWith('/api/watch/rooms/$_uburoomRoomId') && push.value is Map<String, dynamic>) {
+      _handleUburoomSnapshot(push.value as Map<String, dynamic>);
+    }
+  }
+
+  void _onUburoomRoomKicked(String roomId) {
+    if (roomId == _uburoomRoomId) {
+      _notify(const EndedNotice(owp.EndReason.kicked));
+      leave();
+    }
+  }
+
+  void _handleUburoomSnapshot(Map<String, dynamic> snapshot) {
+    _lastUburoomSnapshot = snapshot;
+    _uburoomReconciler?.updateRoomSnapshot(snapshot);
+
+    final roomObj = snapshot['room'] as Map<String, dynamic>? ?? snapshot;
+    final rawEpoch = (snapshot['epoch'] ?? roomObj['epoch'])?.toString() ?? '';
+    if (rawEpoch.isNotEmpty) {
+      _uburoomEpoch = rawEpoch;
+    }
+    final int epoch = int.tryParse(rawEpoch) ?? (roomObj['revision'] as int? ?? 1);
+    final int rev = roomObj['revision'] as int? ?? 1;
+
+    final mediaObj = snapshot['media'] as Map<String, dynamic>?;
+    final stateObj = snapshot['state'] as Map<String, dynamic>?;
+    final bool paused = stateObj?['paused'] as bool? ?? (snapshot['paused'] as bool? ?? true);
+    final double rate = (stateObj?['rate'] as num?)?.toDouble() ?? 1.0;
+    final int startAt = snapshot['startAt'] as int? ?? 0;
+    final int pauseAt = snapshot['pauseAt'] as int? ?? 0;
+
+    final int serverNow = _clockSync.serverNow;
+    final int positionMs = paused
+        ? math.max(0, pauseAt)
+        : (serverNow < startAt ? 0 : ((serverNow - startAt) * rate).round());
+
+    final bool waitingForReady = snapshot['waitingForReady'] as bool? ?? false;
+    final owp.Phase phase = mediaObj == null
+        ? owp.Phase.idle
+        : (waitingForReady ? owp.Phase.waiting : (paused ? owp.Phase.paused : owp.Phase.playing));
+
+    final viewersList = (snapshot['viewers'] as List<dynamic>?) ?? const [];
+    final participants = viewersList.map<owp.Participant>((v) {
+      final vMap = v as Map<String, dynamic>;
+      final userId = vMap['userId'] as String? ?? 'user';
+      final name = vMap['name'] as String? ?? 'Viewer';
+      final isHost = vMap['isHost'] as bool? ?? false;
+      final ready = vMap['ready'] as bool? ?? false;
+      return owp.Participant(
+        peerId: userId,
+        name: name,
+        client: 'plezy-uburoom',
+        host: isHost,
+        connected: true,
+        player: ready ? owp.PlayerState.ready : owp.PlayerState.loading,
+        match: const owp.Match(owp.MatchState.matched),
+        offsetMs: 0,
+      );
+    }).toList();
+
+    owp.Media? owpMedia;
+    owp.Candidate<WatchCopy>? choiceCandidate;
+
+    if (mediaObj != null) {
+      final ratingKey = mediaObj['id']?.toString() ?? '';
+      final title = mediaObj['title'] as String? ?? 'Untitled';
+      final duration = (mediaObj['duration'] as num?)?.toInt() ?? 0;
+      final kindStr = mediaObj['kind'] as String?;
+      final kind = kindStr == 'episode'
+          ? owp.MediaKind.episode
+          : (kindStr == 'video' ? owp.MediaKind.video : owp.MediaKind.movie);
+
+      owpMedia = owp.Media(kind: kind, title: title, durationMs: duration, ids: {'ratingKey': ratingKey});
+
+      WatchCopy copy;
+      if (_player?.adapter.copy != null) {
+        copy = _player!.adapter.copy;
+      } else {
+        final serverUrl = _uburoomServerUrl ?? _authService.serverUrl;
+        final mediaUrl = snapshot['mediaUrl'] as String? ?? snapshot['directHls'] as String?;
+        MediaItem? syntheticItem;
+        if (mediaUrl != null && serverUrl != null) {
+          final baseUri = Uri.parse(serverUrl);
+          final resolvedUri = baseUri.resolve(mediaUrl);
+          final streamUrl = resolvedUri.toString();
+          final isSameOrigin =
+              baseUri.scheme == resolvedUri.scheme &&
+              baseUri.host == resolvedUri.host &&
+              baseUri.port == resolvedUri.port;
+          final token = _uburoomToken;
+          final headers = <String, String>{
+            if (isSameOrigin && token != null && token.isNotEmpty) 'Authorization': 'Bearer $token',
+          };
+          syntheticItem = MediaItem(
+            id: ratingKey,
+            backend: MediaBackend.plex,
+            kind: kindStr == 'episode' ? MediaKind.episode : MediaKind.movie,
+            title: title,
+            durationMs: duration > 0 ? duration : null,
+            serverId: 'uburoom',
+            raw: {'uburoomMediaUrl': streamUrl, 'uburoomHeaders': headers},
+          );
+        }
+        copy = WatchCopy(serverId: 'uburoom', itemId: ratingKey, versionId: '', item: syntheticItem);
+      }
+      choiceCandidate = owp.Candidate<WatchCopy>(id: ratingKey, ref: copy, durationMs: duration > 0 ? duration : null);
+    }
+
+    _state = owp.PartyState<WatchCopy>(
+      connection: owp.Connection.connected,
+      peerId: _viewerId,
+      room: owp.Room(
+        rev: rev,
+        code: _uburoomRoomId ?? '',
+        epoch: epoch,
+        phase: phase,
+        positionMs: positionMs,
+        atMs: serverNow,
+        rate: rate,
+        control: owp.Control.everyone,
+        locked: roomObj['locked'] as bool? ?? false,
+        waitingOn: const [],
+        participants: participants,
+      ),
+      media: owpMedia,
+      match: owpMedia != null ? const owp.Match(owp.MatchState.matched) : null,
+      choice: choiceCandidate,
+      mismatch: null,
+      candidates: choiceCandidate != null ? [owp.Ranked(choiceCandidate, 0)] : const [],
+      offsetMs: 0,
+      player: (_player?.adapter.paused ?? true) ? owp.PlayerState.ready : owp.PlayerState.ready,
+      endReason: null,
+    );
+
+    if (choiceCandidate != null) {
+      _openChoice();
+    }
+
+    notifyListeners();
+  }
+
   @override
   void dispose() {
     _disposed = true;
     _player?.adapter.release();
     _player = null;
+    _uburoomReconciler?.dispose();
+    _uburoomReconciler = null;
+    unawaited(_uburoomStateSub?.cancel());
+    unawaited(_uburoomConnSub?.cancel());
+    unawaited(_uburoomKickSub?.cancel());
+    _socketService?.dispose();
     unawaited(_closeParty());
     unawaited(_notices.close());
     super.dispose();

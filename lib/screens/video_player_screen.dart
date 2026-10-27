@@ -1,6 +1,8 @@
 import 'dart:async';
+
 import '../services/playback_launch_observer.dart';
 import '../media/ids.dart';
+
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -965,7 +967,8 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen>
     shouldSkipForPip: () => _shouldSkipForPip,
     isPlayerInitialized: () => _isPlayerInitialized,
     metadata: () => _currentMetadata,
-    client: () => _isOfflinePlayback ? null : _getMediaServerClient(context),
+    client: () =>
+        (_isOfflinePlayback || (_watchTogetherRoom()?.isInSession ?? false)) ? null : _getMediaServerClient(context),
     isPlaylistActive: () => context.read<PlaybackStateProvider>().isPlaylistActive,
     canControlPlayback: () => _canControlPlayback(),
     canNavigateMediaItems: () => _canNavigateMediaItems(),
@@ -1063,7 +1066,7 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen>
   /// Whether a downloaded copy may stand in for a capped
   /// [_selectedQualityPreset] (issue #2466). Only the saved startup default
   /// yields; a picked quality is honored.
-  bool get _downloadOutranksQuality => !_qualityPresetExplicit;
+  bool get _downloadOutranksQuality => !_qualityPresetExplicit || (_watchTogetherRoom()?.isInSession ?? false);
 
   /// Atomically publish a freshly opened [PlaybackSession] and refine the
   /// selection-intent fields from what the backend actually delivered
@@ -1731,7 +1734,7 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen>
         // Jellyfin's `streamHeaders` is empty because it embeds api_key in
         // the query string, while Plex returns the X-Plex-* identity headers.
         final genericClient = _getMediaServerClient(context);
-        if (genericClient == null) {
+        if (genericClient == null && _currentMetadata.raw?['uburoomMediaUrl'] == null) {
           throw StateError('No client registered for ${_currentMetadata.serverId}');
         }
         // Single source of truth for showing quality controls and applying the
@@ -1739,7 +1742,7 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen>
         // saved default applies, which on a cellular-only connection is the
         // cellular one when set. The connection type piggybacks on the app's
         // single connectivity subscription in OfflineModeProvider.
-        _serverSupportsTranscoding = genericClient.capabilities.videoTranscoding;
+        _serverSupportsTranscoding = genericClient?.capabilities.videoTranscoding ?? false;
         _selectedQualityPreset =
             widget.selectedQualityPreset ??
             TranscodeQualityPreset.resolveStartupDefault(
@@ -1775,6 +1778,7 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen>
           ),
           offlineLibraryMode: false,
           downloadOutranksQuality: _downloadOutranksQuality,
+          suppressServerReporting: _watchTogetherRoom()?.isInSession ?? false,
         );
         // If MPV setup below throws before `_startPlayback` awaits this,
         // tell Dart we've "handled" the future so it's not reported as an

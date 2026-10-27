@@ -20,6 +20,7 @@ import '../../widgets/overlay_sheet.dart';
 import '../providers/watch_together_provider.dart';
 import '../services/recent_rooms_service.dart';
 import '../widgets/join_session_dialog.dart';
+import '../widgets/uburoom_auth_dialog.dart';
 import '../widgets/watch_labels.dart';
 import '../widgets/watch_room_sections.dart';
 
@@ -92,6 +93,13 @@ class _WatchTogetherScreenState extends State<WatchTogetherScreen> with MountedS
       canPop: true,
       child: FocusedScrollScaffold(
         title: Text(t.watchTogether.title),
+        actions: [
+          IconButton(
+            tooltip: 'Uburoom Server',
+            icon: const AppIcon(Symbols.dns_rounded),
+            onPressed: () => showUburoomAuthDialog(context),
+          ),
+        ],
         slivers: [
           SliverPadding(
             padding: const EdgeInsets.all(16),
@@ -193,6 +201,14 @@ class _LobbyViewState extends State<_LobbyView> with MountedSetStateMixin {
           relay == null ? t.watchTogether.relayPublic : t.watchTogether.relayCustom(url: relay),
           style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
           textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 8),
+        Center(
+          child: TextButton.icon(
+            icon: const AppIcon(Symbols.dns_rounded, size: 18),
+            label: const Text('Uburoom Server Settings'),
+            onPressed: () => showUburoomAuthDialog(context),
+          ),
         ),
         if (profileId != null && rooms.isNotEmpty) ...[
           const SizedBox(height: 32),

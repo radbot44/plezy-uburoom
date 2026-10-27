@@ -583,6 +583,7 @@ extension _VideoPlayerReloadMethods on VideoPlayerScreenState {
           ),
           offlineLibraryMode: _offlineLibraryMode,
           downloadOutranksQuality: downloadOutranksQuality,
+          suppressServerReporting: wtOwnsStart || (_watchTogetherRoom()?.isInSession ?? false),
         );
         if (!isCurrentReload()) return MediaReloadOutcome.superseded;
         final result = playbackContext.result;

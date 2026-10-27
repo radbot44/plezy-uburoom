@@ -32,7 +32,7 @@ extension _VideoPlayerWatchTogetherMethods on VideoPlayerScreenState {
   /// Whether the room can get the file the player has open: a stream, or a
   /// download of a server that is online now. A download is the server's
   /// file, so the room shares the server's copy of it.
-  bool _roomCanGetOpenedFile() => !_isOfflinePlayback || _getOnlineMediaServerClient(context) != null;
+  bool _roomCanGetOpenedFile() => !_offlineLibraryMode || _getOnlineMediaServerClient(context) != null;
 
   /// The room sets the rate, not the item's remembered speed.
   bool _watchTogetherOwnsPlaybackRate() => _watchTogetherOwnsPlaybackStart();

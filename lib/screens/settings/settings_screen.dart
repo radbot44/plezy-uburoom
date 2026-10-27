@@ -51,6 +51,7 @@ import '../../widgets/system_bottom_inset.dart';
 import '../../profiles/active_profile_provider.dart';
 import '../../profiles/profile.dart';
 import '../../watch_together/services/watch_party_relays.dart';
+import '../../watch_together/widgets/uburoom_auth_dialog.dart';
 import 'about_screen.dart';
 import 'add_connection_screen.dart';
 import 'account_preferences_screen.dart';
@@ -120,6 +121,7 @@ class _SettingsScreenState extends State<SettingsScreen> with FocusableTab, Moun
   static const _kAutoCheckUpdatesOnStartup = 'auto_check_updates_on_startup';
   static const _kAbout = 'about';
   static const _kWatchTogetherRelay = 'watch_together_relay';
+  static const _kUburoomServer = 'uburoom_server';
   static const _kExportSettings = 'export_settings';
   static const _kImportSettings = 'import_settings';
   static const _kAccountPreferences = 'account_preferences';
@@ -556,6 +558,13 @@ class _SettingsScreenState extends State<SettingsScreen> with FocusableTab, Moun
           title: t.settings.watchTogetherRelay,
           subtitle: t.settings.watchTogetherRelayDescription,
           onTap: () => _showRelayUrlDialog(),
+        ),
+        SettingNavigationTile(
+          focusNode: _focusTracker.get(_kUburoomServer),
+          icon: Symbols.dns_rounded,
+          title: 'Uburoom Server',
+          subtitle: 'Configure uburoom server URL and native client authentication',
+          onTap: () => showUburoomAuthDialog(context),
         ),
         SettingSwitchTile(
           focusNode: _focusTracker.get(_kCrashReporting),

@@ -74,4 +74,7 @@ bool isSeerrSessionPrefKey(String key) => profileScopedCredentialBaseKey(key) ==
 /// Whether [key] holds a credential and must never be dropped or exported
 /// without an explicit, informed user decision.
 bool isSensitivePrefKey(String key) =>
-    key == credentialVaultKeyPref || key == legacyPlexTokenPref || profileScopedCredentialBaseKey(key) != null;
+    key == credentialVaultKeyPref ||
+    key == legacyPlexTokenPref ||
+    key == 'uburoom_token' ||
+    profileScopedCredentialBaseKey(key) != null;

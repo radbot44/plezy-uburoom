@@ -522,6 +522,19 @@ String? _normalizeRelayBaseUrl(String? value) {
   return base;
 }
 
+String? _normalizeHttpUrl(String? value) {
+  if (value == null || value.trim().isEmpty) return null;
+  var raw = value.trim();
+  if (!raw.startsWith('http://') && !raw.startsWith('https://')) {
+    raw = 'https://$raw';
+  }
+  final uri = Uri.tryParse(raw);
+  if (uri == null || uri.host.isEmpty) {
+    throw const FormatException('Invalid server URL');
+  }
+  return '${uri.scheme}://${uri.host}${uri.hasPort ? ':${uri.port}' : ''}';
+}
+
 String _legacyMpvEntriesToText(List<dynamic> entries) {
   final lines = <String>[];
   for (final item in entries) {
@@ -923,6 +936,8 @@ class SettingsService extends BaseSharedPreferencesService {
   /// A self-hosted Open Watch Party relay's base URL; null for the public
   /// relays.
   static final watchPartyRelayUrl = NullableStringPref('watch_party_relay_url', transform: _normalizeRelayBaseUrl);
+  static final uburoomServerUrl = NullableStringPref('uburoom_server_url', transform: _normalizeHttpUrl);
+  static const uburoomToken = NullableStringPref('uburoom_token');
 
   static NullableStringPref recentRoomsForProfile(String profileId) {
     if (profileId.trim().isEmpty) {
@@ -1622,6 +1637,7 @@ class SettingsService extends BaseSharedPreferencesService {
     selectedExternalPlayer,
     customExternalPlayers,
     watchPartyRelayUrl,
+    uburoomServerUrl,
     companionRemoteLastHostAddress,
     rememberedBrightnessLevel,
     refusedVideoCodecs,
@@ -1646,6 +1662,7 @@ class SettingsService extends BaseSharedPreferencesService {
     crashReporting,
     mpvConfigText,
     watchPartyRelayUrl,
+    uburoomServerUrl,
     rememberedBrightnessLevel,
   ]);
 

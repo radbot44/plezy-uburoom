@@ -1,9 +1,9 @@
 <h1>
   <img src="assets/plezy.png" alt="Plezy Logo" height="24" style="vertical-align: middle;" />
-  Plezy
+  plezy-uburoom
 </h1>
 
-A modern client for Plex, Jellyfin, and Emby on desktop, mobile, and TV. Built with Flutter for native performance and a clean interface.
+A native desktop, mobile, and TV companion client for **uburoom** and Plex, forked from Plezy. Combines Plezy's native `libmpv` player and offline download engine with uburoom's server-authoritative watch rooms, enabling synchronized watch parties anywhere—including zero-bandwidth playback from locally downloaded files. See `UBUROOM.md` and `AGENTS.md` for architecture and integration rules.
 
 <p>
   <a href="https://plezy.app">Website</a> ·

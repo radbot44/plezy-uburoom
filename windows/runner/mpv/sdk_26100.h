@@ -9,6 +9,8 @@
 
 // Only define these if the SDK doesn't already have them (SDK < 10.0.26100.0).
 #ifndef NTDDI_WIN11_GE
+#pragma warning(push)
+#pragma warning(disable : 4201)
 
 enum {
   DISPLAYCONFIG_DEVICE_INFO_SET_RESERVED1 = 14,
@@ -55,6 +57,7 @@ typedef struct _DISPLAYCONFIG_SET_HDR_STATE {
   };
 } DISPLAYCONFIG_SET_HDR_STATE;
 
+#pragma warning(pop)
 #endif  // NTDDI_WIN11_GE
 
 // DisplayConfig virtual-refresh-rate awareness flags for Dynamic Refresh Rate
