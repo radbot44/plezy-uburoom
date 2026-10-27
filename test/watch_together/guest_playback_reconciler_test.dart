@@ -631,7 +631,7 @@ void main() {
       final item = choice!.ref.item;
       expect(item, isNotNull);
       expect(item!.raw?['uburoomMediaUrl'], 'http://localhost:6767/api/watch/media/grant-abc/start');
-      expect(item!.raw?['uburoomHeaders'], {'Authorization': 'Bearer token-64hex'});
+      expect(item.raw?['uburoomHeaders'], {'Authorization': 'Bearer token-64hex'});
     });
 
     test('does not attach Authorization header to cross-origin Plex direct delivery URLs', () {
@@ -669,7 +669,7 @@ void main() {
       final item = choice!.ref.item;
       expect(item, isNotNull);
       expect(item!.raw?['uburoomMediaUrl'], directPmsUrl);
-      expect(item!.raw?['uburoomHeaders'], isEmpty);
+      expect(item.raw?['uburoomHeaders'], isEmpty);
     });
   });
 }

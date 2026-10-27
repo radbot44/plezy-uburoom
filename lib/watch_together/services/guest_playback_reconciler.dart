@@ -66,7 +66,7 @@ class GuestPlaybackReconciler {
   bool _paused = true;
   double _roomRate = 1.0;
   bool _waitingForReady = false;
-  int? _readinessVersion;
+  Object? _readinessVersion;
 
   int _lastSeekAt = 0;
   double _currentSlewRate = 1.0;
@@ -113,8 +113,7 @@ class GuestPlaybackReconciler {
     _roomRate = (stateObj?['rate'] as num?)?.toDouble() ?? 1.0;
 
     _waitingForReady = snapshot['waitingForReady'] as bool? ?? false;
-    final readiness = snapshot['readiness'] as Map<String, dynamic>?;
-    _readinessVersion = readiness?['version'] as int?;
+    _readinessVersion = snapshot['readinessVersion'] ?? (snapshot['readiness'] as Map<String, dynamic>?)?['version'];
 
     _handleReadinessGate();
     _handleStartCountdown();

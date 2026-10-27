@@ -22,6 +22,7 @@ import '../services/recent_rooms_service.dart';
 import '../services/watch_party_relays.dart';
 import '../widgets/join_session_dialog.dart';
 import '../widgets/uburoom_lobby.dart';
+import '../widgets/uburoom_room_view.dart';
 import '../widgets/uburoom_auth_dialog.dart';
 import '../widgets/watch_labels.dart';
 import '../widgets/watch_room_sections.dart';
@@ -89,7 +90,10 @@ class _WatchTogetherScreenState extends State<WatchTogetherScreen> with MountedS
         onJoinRecent: _joinRecent,
       ),
       _View.connecting => _ConnectingView(attempt: _attempt),
-      _View.room => const _RoomView(),
+      _View.room =>
+        context.select<WatchTogetherProvider, bool>((p) => p.isUburoomSession)
+            ? const UburoomRoomView()
+            : const _RoomView(),
     };
     return OverlaySheetHost(
       canPop: true,

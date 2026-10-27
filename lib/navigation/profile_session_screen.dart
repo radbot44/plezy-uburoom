@@ -278,6 +278,7 @@ class _ProfileSessionScreenState extends State<ProfileSessionScreen> {
                     findCopies: multiServer.aggregationService.findTitleCopiesAcrossServers,
                     displayName: () => activeProfile.active?.displayName ?? 'Plezy',
                     profileId: () => activeProfile.activeId,
+                    database: context.read<AppDatabase>(),
                   );
                 },
               ),

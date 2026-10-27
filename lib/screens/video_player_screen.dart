@@ -1734,7 +1734,9 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen>
         // Jellyfin's `streamHeaders` is empty because it embeds api_key in
         // the query string, while Plex returns the X-Plex-* identity headers.
         final genericClient = _getMediaServerClient(context);
-        if (genericClient == null && _currentMetadata.raw?['uburoomMediaUrl'] == null) {
+        if (genericClient == null &&
+            _currentMetadata.raw?['uburoomMediaUrl'] == null &&
+            _currentMetadata.raw?['uburoomLocalPath'] == null) {
           throw StateError('No client registered for ${_currentMetadata.serverId}');
         }
         // Single source of truth for showing quality controls and applying the

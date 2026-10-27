@@ -28,6 +28,9 @@ import '../services/clock_sync.dart';
 import '../services/guest_playback_reconciler.dart';
 import '../services/uburoom_auth_service.dart';
 import '../services/uburoom_socket_service.dart';
+import '../../database/app_database.dart';
+import '../../services/downloaded_video_source.dart';
+import '../models/uburoom_room_state.dart';
 
 typedef WatchPartyFactory =
     owp.WatchParty<WatchCopy> Function({
@@ -77,9 +80,10 @@ class WatchTogetherProvider extends ChangeNotifier {
     Future<String> Function()? clientName,
     WatchPartyFactory? partyFactory,
     ClockSync? clockSync,
-    UburoomSocketService? socketService,
+    this._socketService,
     UburoomAuthService? authService,
     String? viewerId,
+    this._database,
     this.shareDurationWait = const Duration(seconds: 30),
   }) : _clientFor = clientFor ?? _noClient,
        _displayName = displayName ?? _defaultName,
@@ -88,7 +92,6 @@ class WatchTogetherProvider extends ChangeNotifier {
        _clientName = clientName ?? _plezyClientName,
        _partyFactory = partyFactory ?? _defaultParty,
        _clockSync = clockSync ?? ClockSync(),
-       _socketService = socketService,
        _authService = authService ?? UburoomAuthService(),
        _viewerId = viewerId ?? const Uuid().v4(),
        _resolver = LibraryResolver(clientFor: clientFor ?? _noClient, findCopies: findCopies ?? _noCopies);
@@ -119,17 +122,23 @@ class WatchTogetherProvider extends ChangeNotifier {
   UburoomSocketService? _socketService;
   final UburoomAuthService _authService;
   final String _viewerId;
+  final AppDatabase? _database;
   GuestPlaybackReconciler? _uburoomReconciler;
   String? _uburoomRoomId;
   String? _uburoomServerUrl;
   String? _uburoomToken;
   String? _uburoomEpoch;
+  UburoomRoomState? _uburoomState;
+  WatchCopy? _uburoomCopy;
+  String _uburoomDelivery = 'auto';
   Map<String, dynamic>? _lastUburoomSnapshot;
   StreamSubscription? _uburoomStateSub;
   StreamSubscription? _uburoomConnSub;
   StreamSubscription? _uburoomKickSub;
 
   bool get isUburoomSession => _uburoomRoomId != null;
+  UburoomRoomState? get uburoomState => _uburoomState;
+  String get viewerId => _viewerId;
 
   owp.WatchParty<WatchCopy>? _party;
   StreamSubscription<owp.PartyState<WatchCopy>>? _stateSubscription;
@@ -176,31 +185,81 @@ class WatchTogetherProvider extends ChangeNotifier {
   // State
 
   owp.PartyState<WatchCopy> get state => _state;
-  owp.Connection get connection => _state.connection;
+  owp.Connection get connection {
+    if (isUburoomSession) {
+      return switch (_socketService?.state) {
+        UburoomConnectionState.connected => owp.Connection.connected,
+        UburoomConnectionState.connecting || UburoomConnectionState.authenticating => owp.Connection.connecting,
+        UburoomConnectionState.reconnecting => owp.Connection.reconnecting,
+        UburoomConnectionState.disconnected || null => owp.Connection.idle,
+      };
+    }
+    return _state.connection;
+  }
 
   /// In a room, or joining one.
-  bool get isInSession =>
-      connection == owp.Connection.connecting ||
-      connection == owp.Connection.connected ||
-      connection == owp.Connection.reconnecting;
-  bool get isConnected => connection == owp.Connection.connected;
-  bool get isReconnecting => connection == owp.Connection.reconnecting;
-  owp.Room? get room => isInSession ? _state.room : null;
-  String? get roomCode => room?.code;
+  bool get isInSession {
+    if (isUburoomSession) {
+      return _uburoomRoomId != null && connection != owp.Connection.idle;
+    }
+    return connection == owp.Connection.connecting ||
+        connection == owp.Connection.connected ||
+        connection == owp.Connection.reconnecting;
+  }
+
+  bool get isConnected =>
+      isUburoomSession ? (connection == owp.Connection.connected) : (connection == owp.Connection.connected);
+
+  bool get isReconnecting =>
+      isUburoomSession ? (connection == owp.Connection.reconnecting) : (connection == owp.Connection.reconnecting);
+
+  owp.Room? get room => isUburoomSession ? null : (isInSession ? _state.room : null);
+
+  String? get roomCode => isUburoomSession ? _uburoomRoomId : room?.code;
+
   String? get formattedRoomCode => roomCode == null
       ? null
       : isUburoomRoomCode(roomCode!)
       ? roomCode
       : owp.formatCode(roomCode!);
-  List<owp.Participant> get participants => room?.participants ?? const [];
-  int get participantCount => participants.length;
-  String? get myPeerId => _state.peerId;
-  bool get isHost => isInSession && _state.isHost;
-  bool get canControl => isInSession && _state.canControl;
-  owp.Control get control => room?.control ?? owp.Control.host;
-  bool get isLocked => room?.locked ?? false;
-  owp.Media? get media => isInSession ? _state.media : null;
-  bool get hasMedia => media != null;
+
+  List<owp.Participant> get participants {
+    if (isUburoomSession) {
+      return (_uburoomState?.participants ?? const [])
+          .map(
+            (p) => owp.Participant(
+              peerId: p.id,
+              name: p.name,
+              client: 'uburoom',
+              host: p.isHost,
+              connected: p.present,
+              player: p.present ? owp.PlayerState.ready : owp.PlayerState.idle,
+              match: null,
+              offsetMs: 0,
+            ),
+          )
+          .toList();
+    }
+    return room?.participants ?? const [];
+  }
+
+  List<UburoomParticipant> get uburoomParticipants => _uburoomState?.participants ?? const [];
+
+  int get participantCount => isUburoomSession ? (_uburoomState?.participants.length ?? 0) : participants.length;
+
+  String? get myPeerId => isUburoomSession ? _viewerId : _state.peerId;
+
+  bool get isHost => isUburoomSession ? (_uburoomState?.isHost ?? false) : (isInSession && _state.isHost);
+
+  bool get canControl => isUburoomSession ? (_uburoomState?.canPlayback ?? false) : (isInSession && _state.canControl);
+
+  owp.Control get control => isUburoomSession ? owp.Control.everyone : (room?.control ?? owp.Control.host);
+
+  bool get isLocked => isUburoomSession ? false : (room?.locked ?? false);
+
+  owp.Media? get media => isUburoomSession ? null : (isInSession ? _state.media : null);
+
+  bool get hasMedia => isUburoomSession ? (_uburoomState?.hasMedia ?? false) : (media != null);
 
   /// The room's file is open in this user's player and the room drives it.
   bool get isFollowing {
@@ -212,7 +271,13 @@ class WatchTogetherProvider extends ChangeNotifier {
   /// file open.
   bool follows(PlezyPlayerAdapter adapter) {
     if (isUburoomSession) {
-      return isConnected && _attached && identical(_player?.adapter, adapter);
+      final currentMediaId = _uburoomState?.mediaId;
+      return isConnected &&
+          _attached &&
+          identical(_player?.adapter, adapter) &&
+          currentMediaId != null &&
+          currentMediaId.isNotEmpty &&
+          adapter.copy.itemId == currentMediaId;
     }
     final choice = _state.choice;
     final match = _state.match?.state;
@@ -226,12 +291,35 @@ class WatchTogetherProvider extends ChangeNotifier {
 
   /// The room's file this user would open: their match, or the media they
   /// shared themselves (id `""`). Null while searching or without a copy.
-  owp.Candidate<WatchCopy>? get roomCopy => isInSession ? _state.choice : null;
+  owp.Candidate<WatchCopy>? get roomCopy {
+    if (isUburoomSession) {
+      final copy = _uburoomCopy;
+      return copy != null ? owp.Candidate<WatchCopy>(id: copy.itemId, ref: copy) : null;
+    }
+    return isInSession ? _state.choice : null;
+  }
 
   /// The room plays a file this user has but isn't watching: offer to join.
   bool get canJoinPlayback {
+    if (isUburoomSession) {
+      final copy = _uburoomCopy;
+      return isConnected && copy != null && hasMedia && (_player == null || !follows(_player!.adapter));
+    }
     final copy = roomCopy;
     return isConnected && copy != null && media != null && (_player == null || _player!.adapter.copy != copy.ref);
+  }
+
+  Future<bool> joinPlayback() async {
+    if (isUburoomSession) {
+      final copy = _uburoomCopy;
+      if (copy != null) {
+        return await _open(copy);
+      }
+      return false;
+    }
+    final copy = _state.choice?.ref;
+    if (copy == null) return false;
+    return await _open(copy);
   }
 
   /// The player refused to start; the user has to press play on it.
@@ -364,6 +452,12 @@ class WatchTogetherProvider extends ChangeNotifier {
       final socket = _socketService;
       _uburoomReconciler?.dispose();
       _uburoomReconciler = null;
+      unawaited(_uburoomStateSub?.cancel());
+      _uburoomStateSub = null;
+      unawaited(_uburoomConnSub?.cancel());
+      _uburoomConnSub = null;
+      unawaited(_uburoomKickSub?.cancel());
+      _uburoomKickSub = null;
       if (roomId != null && socket != null && socket.isConnected) {
         unawaited(socket.sendRequest('/api/watch/rooms/$roomId/leave', {'viewerId': _viewerId}));
       }
@@ -371,6 +465,8 @@ class WatchTogetherProvider extends ChangeNotifier {
       _uburoomServerUrl = null;
       _uburoomToken = null;
       _uburoomEpoch = null;
+      _uburoomState = null;
+      _uburoomCopy = null;
       _attached = false;
       _state = const owp.PartyState.initial();
       notifyListeners();
@@ -385,7 +481,11 @@ class WatchTogetherProvider extends ChangeNotifier {
       final roomId = _uburoomRoomId;
       final socket = _socketService;
       if (roomId != null && socket != null && socket.isConnected) {
-        unawaited(socket.sendRequest('/api/watch/rooms/$roomId/close', {'epoch': _state.room?.epoch ?? 1}));
+        unawaited(
+          socket.sendRequest('/api/watch/rooms/$roomId/close', {
+            'epoch': _uburoomEpoch ?? (_uburoomState?.epoch ?? ''),
+          }),
+        );
       }
       leave();
       return;
@@ -512,11 +612,8 @@ class WatchTogetherProvider extends ChangeNotifier {
     if (!_routes()) return false;
     if (_refuseWithoutControl()) return true;
     if (isUburoomSession) {
-      unawaited(
-        _sendUburoomCommand('media.seek.absolute', {
-          'position': position.inMilliseconds < 0 ? 0 : position.inMilliseconds,
-        }),
-      );
+      final double seconds = math.max(0.0, position.inMilliseconds / 1000.0);
+      unawaited(_sendUburoomCommand('media.seek.absolute', {'seconds': seconds}));
       return true;
     }
     _guard(() => _party!.seek(position.inMilliseconds < 0 ? 0 : position.inMilliseconds));
@@ -539,7 +636,7 @@ class WatchTogetherProvider extends ChangeNotifier {
 
   /// The room's playback rate: the speed the user chose for everyone, as
   /// opposed to the player's momentary drift-correcting rate.
-  double? get roomRate => room?.rate;
+  double? get roomRate => isUburoomSession ? _uburoomState?.rate : room?.rate;
 
   // ---------------------------------------------------------------------------
   // The player
@@ -660,12 +757,6 @@ class WatchTogetherProvider extends ChangeNotifier {
     adapter.release();
     if (!identical(_player?.adapter, adapter)) return Future.value();
     _player = null;
-    _uburoomReconciler?.dispose();
-    _uburoomReconciler = null;
-    unawaited(_uburoomStateSub?.cancel());
-    unawaited(_uburoomConnSub?.cancel());
-    unawaited(_uburoomKickSub?.cancel());
-    _socketService?.dispose();
     _attached = false;
     _playBlocked = false;
     if (isUburoomSession) {
@@ -911,7 +1002,7 @@ class WatchTogetherProvider extends ChangeNotifier {
     if (roomId == null || socket == null || !socket.isConnected) return;
     try {
       await socket.sendRequest('/api/watch/rooms/$roomId/command', {
-        'epoch': _uburoomEpoch ?? (_state.room?.epoch.toString() ?? ''),
+        'epoch': _uburoomEpoch ?? (_uburoomState?.epoch ?? ''),
         'expiresAt': _clockSync.serverNow + 2500,
         'viewerId': _viewerId,
         'command': {'action': action, 'args': ?args},
@@ -1022,8 +1113,10 @@ class WatchTogetherProvider extends ChangeNotifier {
     unawaited(_uburoomKickSub?.cancel());
     _uburoomKickSub = socket.roomKickedStream.listen(_onUburoomRoomKicked);
 
-    final delivery = (_player != null) ? 'local' : 'auto';
-    final res = await socket.sendRequest('/api/watch/rooms/$roomId?viewer=$_viewerId&quality=auto&delivery=$delivery');
+    _uburoomDelivery = 'auto';
+    final res = await socket.sendRequest(
+      '/api/watch/rooms/$roomId?viewer=$_viewerId&quality=auto&delivery=$_uburoomDelivery',
+    );
     final snapshot = _uburoomValue(res);
 
     _uburoomRoomId = roomId;
@@ -1031,7 +1124,7 @@ class WatchTogetherProvider extends ChangeNotifier {
     _uburoomToken = token;
     await _rememberRoom(roomId);
 
-    _handleUburoomSnapshot(snapshot);
+    await _handleUburoomSnapshot(snapshot);
 
     final player = _player;
     if (player != null && !_isAway) {
@@ -1053,7 +1146,7 @@ class WatchTogetherProvider extends ChangeNotifier {
   void _onUburoomStatePush(UburoomRoomStatePush push) {
     if (_disposed || !isUburoomSession) return;
     if (push.path.startsWith('/api/watch/rooms/$_uburoomRoomId') && push.value is Map<String, dynamic>) {
-      _handleUburoomSnapshot(push.value as Map<String, dynamic>);
+      unawaited(_handleUburoomSnapshot(push.value as Map<String, dynamic>));
     }
   }
 
@@ -1064,79 +1157,61 @@ class WatchTogetherProvider extends ChangeNotifier {
     }
   }
 
-  void _handleUburoomSnapshot(Map<String, dynamic> snapshot) {
+  Future<void> _handleUburoomSnapshot(Map<String, dynamic> snapshot) async {
     _lastUburoomSnapshot = snapshot;
+    final ubState = UburoomRoomState.fromSnapshot(snapshot, deliveryMode: _uburoomDelivery);
+    _uburoomState = ubState;
+    if (ubState.epoch.isNotEmpty) {
+      _uburoomEpoch = ubState.epoch;
+    }
     _uburoomReconciler?.updateRoomSnapshot(snapshot);
 
-    final roomObj = snapshot['room'] as Map<String, dynamic>? ?? snapshot;
-    final rawEpoch = (snapshot['epoch'] ?? roomObj['epoch'])?.toString() ?? '';
-    if (rawEpoch.isNotEmpty) {
-      _uburoomEpoch = rawEpoch;
-    }
-    final int epoch = int.tryParse(rawEpoch) ?? (roomObj['revision'] as int? ?? 1);
-    final int rev = roomObj['revision'] as int? ?? 1;
+    if (ubState.hasMedia) {
+      final ratingKey = ubState.mediaId!;
+      final title = ubState.title;
+      final durationMs = (ubState.durationSeconds * 1000).round();
 
-    final mediaObj = snapshot['media'] as Map<String, dynamic>?;
-    final stateObj = snapshot['state'] as Map<String, dynamic>?;
-    final bool paused = stateObj?['paused'] as bool? ?? (snapshot['paused'] as bool? ?? true);
-    final double rate = (stateObj?['rate'] as num?)?.toDouble() ?? 1.0;
-    final int startAt = snapshot['startAt'] as int? ?? 0;
-    final int pauseAt = snapshot['pauseAt'] as int? ?? 0;
+      // Check if a completed local download exists for this ratingKey
+      DownloadedVideoSource? localSource;
+      final db = _database;
+      if (db != null) {
+        try {
+          final query = db.select(db.downloadedMedia)..where((tbl) => tbl.ratingKey.equals(ratingKey));
+          final items = await query.get();
+          for (final item in items) {
+            final src = await resolveDownloadedVideoSource(item, allowAnyDownloadedVersion: true);
+            if (src != null) {
+              localSource = src;
+              break;
+            }
+          }
+        } catch (e) {
+          appLogger.w('Uburoom: error checking local download for $ratingKey', error: e);
+        }
+      }
 
-    final int serverNow = _clockSync.serverNow;
-    final int positionMs = paused
-        ? math.max(0, pauseAt)
-        : (serverNow < startAt ? 0 : ((serverNow - startAt) * rate).round());
-
-    final bool waitingForReady = snapshot['waitingForReady'] as bool? ?? false;
-    final owp.Phase phase = mediaObj == null
-        ? owp.Phase.idle
-        : (waitingForReady ? owp.Phase.waiting : (paused ? owp.Phase.paused : owp.Phase.playing));
-
-    // The server sends a viewer count and a separate participant list.
-    final viewersList = snapshot['participants'] is List
-        ? snapshot['participants'] as List
-        : snapshot['viewers'] is List
-        ? snapshot['viewers'] as List
-        : const [];
-    final participants = viewersList.map<owp.Participant>((v) {
-      final vMap = v as Map<String, dynamic>;
-      final userId = (vMap['id'] ?? vMap['userId']) as String? ?? 'user';
-      final name = vMap['name'] as String? ?? 'Viewer';
-      final isHost = vMap['role'] == 'host' || vMap['role'] == 'creator' || vMap['isHost'] == true;
-      final ready = vMap['ready'] as bool? ?? false;
-      return owp.Participant(
-        peerId: userId,
-        name: name,
-        client: 'plezy-uburoom',
-        host: isHost,
-        connected: vMap['present'] != false,
-        player: ready ? owp.PlayerState.ready : owp.PlayerState.loading,
-        match: const owp.Match(owp.MatchState.matched),
-        offsetMs: 0,
-      );
-    }).toList();
-
-    owp.Media? owpMedia;
-    owp.Candidate<WatchCopy>? choiceCandidate;
-
-    if (mediaObj != null) {
-      final ratingKey = mediaObj['id']?.toString() ?? '';
-      final title = mediaObj['title'] as String? ?? 'Untitled';
-      final duration = (mediaObj['duration'] as num?)?.toInt() ?? 0;
-      final kindStr = mediaObj['kind'] as String?;
-      final kind = kindStr == 'episode'
-          ? owp.MediaKind.episode
-          : (kindStr == 'video' ? owp.MediaKind.video : owp.MediaKind.movie);
-
-      owpMedia = owp.Media(kind: kind, title: title, durationMs: duration, ids: {'ratingKey': ratingKey});
-
-      WatchCopy copy;
-      if (_player?.adapter.copy != null) {
-        copy = _player!.adapter.copy;
+      if (localSource != null) {
+        final localItem = MediaItem(
+          id: ratingKey,
+          backend: MediaBackend.plex,
+          kind: MediaKind.movie,
+          title: title,
+          durationMs: durationMs > 0 ? durationMs : null,
+          serverId: 'uburoom',
+          raw: {'uburoomLocalPath': localSource.path},
+        );
+        _uburoomCopy = WatchCopy(serverId: 'uburoom', itemId: ratingKey, versionId: '', item: localItem);
+        if (_uburoomDelivery != 'local') {
+          _uburoomDelivery = 'local';
+          final socket = _socketService;
+          final roomId = _uburoomRoomId;
+          if (socket != null && socket.isConnected && roomId != null) {
+            unawaited(socket.sendRequest('/api/watch/rooms/$roomId?viewer=$_viewerId&quality=auto&delivery=local'));
+          }
+        }
       } else {
         final serverUrl = _uburoomServerUrl ?? _authService.serverUrl;
-        final mediaUrl = snapshot['mediaUrl'] as String? ?? snapshot['directHls'] as String?;
+        final mediaUrl = snapshot['mediaUrl'] as String?;
         MediaItem? syntheticItem;
         if (mediaUrl != null && serverUrl != null) {
           final baseUri = Uri.parse(serverUrl);
@@ -1153,46 +1228,44 @@ class WatchTogetherProvider extends ChangeNotifier {
           syntheticItem = MediaItem(
             id: ratingKey,
             backend: MediaBackend.plex,
-            kind: kindStr == 'episode' ? MediaKind.episode : MediaKind.movie,
+            kind: MediaKind.movie,
             title: title,
-            durationMs: duration > 0 ? duration : null,
+            durationMs: durationMs > 0 ? durationMs : null,
             serverId: 'uburoom',
             raw: {'uburoomMediaUrl': streamUrl, 'uburoomHeaders': headers},
           );
         }
-        copy = WatchCopy(serverId: 'uburoom', itemId: ratingKey, versionId: '', item: syntheticItem);
+        _uburoomCopy = WatchCopy(serverId: 'uburoom', itemId: ratingKey, versionId: '', item: syntheticItem);
       }
-      choiceCandidate = owp.Candidate<WatchCopy>(id: ratingKey, ref: copy, durationMs: duration > 0 ? duration : null);
+    } else {
+      _uburoomCopy = null;
     }
 
+    final choiceCandidate = _uburoomCopy != null
+        ? owp.Candidate<WatchCopy>(id: _uburoomCopy!.itemId, ref: _uburoomCopy!)
+        : null;
     _state = owp.PartyState<WatchCopy>(
       connection: owp.Connection.connected,
       peerId: _viewerId,
-      room: owp.Room(
-        rev: rev,
-        code: _uburoomRoomId ?? '',
-        epoch: epoch,
-        phase: phase,
-        positionMs: positionMs,
-        atMs: serverNow,
-        rate: rate,
-        control: owp.Control.everyone,
-        locked: roomObj['locked'] as bool? ?? false,
-        waitingOn: const [],
-        participants: participants,
-      ),
-      media: owpMedia,
-      match: owpMedia != null ? const owp.Match(owp.MatchState.matched) : null,
+      room: null,
+      media: null,
+      match: null,
       choice: choiceCandidate,
       mismatch: null,
       candidates: choiceCandidate != null ? [owp.Ranked(choiceCandidate, 0)] : const [],
       offsetMs: 0,
-      player: (_player?.adapter.paused ?? true) ? owp.PlayerState.ready : owp.PlayerState.ready,
+      player: owp.PlayerState.idle,
       endReason: null,
     );
 
-    if (choiceCandidate != null) {
-      _openChoice();
+    // In-player auto-sync when already inside player:
+    final player = _player;
+    if (player != null && !_isAway) {
+      if (!ubState.hasMedia) {
+        _playerHooks?.exitPlayer();
+      } else if (_uburoomCopy != null && player.adapter.copy.itemId != ubState.mediaId) {
+        unawaited(_playerHooks?.openInPlace(_uburoomCopy!));
+      }
     }
 
     notifyListeners();

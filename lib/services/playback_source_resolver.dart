@@ -25,6 +25,23 @@ class PlaybackSourceResolver {
     bool suppressServerReporting = false,
   }) async {
     final metadata = options.metadata;
+    final uburoomLocalPath = metadata.raw?['uburoomLocalPath'] as String?;
+    if (uburoomLocalPath != null) {
+      final result = PlaybackInitializationResult(
+        availableVersions: const [],
+        videoUrl: uburoomLocalPath,
+        isOffline: true,
+        isTranscoding: false,
+      );
+      return PlaybackContext(
+        metadata: metadata,
+        result: result,
+        sourceKind: PlaybackSourceKind.localFile,
+        reportingMode: PlaybackReportingMode.disabled,
+        reportingClient: null,
+        streamHeaders: const {},
+      );
+    }
     final uburoomUrl = metadata.raw?['uburoomMediaUrl'] as String?;
     if (uburoomUrl != null) {
       final headers = (metadata.raw?['uburoomHeaders'] as Map<dynamic, dynamic>?)?.map(
