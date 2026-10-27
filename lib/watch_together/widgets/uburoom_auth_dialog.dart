@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:material_symbols_icons/symbols.dart';
+import 'package:provider/provider.dart';
 
 import '../../focus/focusable_text_field.dart';
 import '../../i18n/strings.g.dart';
@@ -11,15 +12,20 @@ import '../../widgets/app_icon.dart';
 import '../../widgets/dialog_action_button.dart';
 import '../../widgets/loading_indicator_box.dart';
 import '../services/uburoom_auth_service.dart';
+import '../providers/watch_together_provider.dart';
 
 /// Opens the dialog to authenticate against an uburoom server using browser handoff
 /// or manual token entry.
 Future<bool> showUburoomAuthDialog(BuildContext context, {UburoomAuthService? authService}) async {
-  return await showScopedDialog<bool>(
+  final provider = context.read<WatchTogetherProvider?>();
+  final result =
+      await showScopedDialog<bool>(
         context: context,
         builder: (_) => UburoomAuthDialog(authService: authService),
       ) ??
       false;
+  if (context.mounted) provider?.refreshServerSettings();
+  return result;
 }
 
 class UburoomAuthDialog extends StatefulWidget {
@@ -239,7 +245,7 @@ class _UburoomAuthDialogState extends State<UburoomAuthDialog> {
                 Text('Approving in browser...', style: theme.textTheme.titleMedium, textAlign: TextAlign.center),
                 const SizedBox(height: 8),
                 Text(
-                  'Confirm the companion connection on your uburoom server:',
+                  'Confirm this code matches in your browser:',
                   style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
                   textAlign: TextAlign.center,
                 ),
@@ -253,10 +259,10 @@ class _UburoomAuthDialogState extends State<UburoomAuthDialog> {
                     ),
                     child: Center(
                       child: Text(
-                        _activeSession!.code,
+                        _activeSession!.displayCode,
                         style: theme.textTheme.headlineMedium?.copyWith(
                           fontFamily: 'monospace',
-                          letterSpacing: 4,
+                          letterSpacing: _activeSession!.verification != null ? 6 : 2,
                           fontWeight: FontWeight.bold,
                           color: theme.colorScheme.primary,
                         ),

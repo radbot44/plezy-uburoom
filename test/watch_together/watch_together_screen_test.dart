@@ -91,6 +91,21 @@ void main() {
   });
 
   group('out of a room', () {
+    _screenTest('configured uburoom server replaces relay instructions', (tester, world) async {
+      await SettingsService.instance.write(SettingsService.uburoomServerUrl, 'https://watch.example');
+      final provider = world.host();
+      await _openScreen(tester, provider);
+      expect(find.text('https://watch.example'), findsOneWidget);
+      expect(find.text(t.watchTogether.relayPublic), findsNothing);
+      final serverScope = provider.relayScope;
+      await SettingsService.instance.write(SettingsService.uburoomServerUrl, null);
+      expect(provider.uburoomServerUrl, isNull);
+      provider.refreshServerSettings();
+      await settleWatchFrames(tester);
+      expect(find.text('https://watch.example'), findsNothing);
+      expect(find.text('To create or join uburoom rooms, sign in to your server below.'), findsOneWidget);
+      expect(provider.relayScope, isNot(serverScope));
+    });
     _screenTest('Create Room makes the user host of a new room, shown by its K7M-Q2X code', (tester, world) async {
       final host = world.host(profileId: 'p1');
       await _openScreen(tester, host);

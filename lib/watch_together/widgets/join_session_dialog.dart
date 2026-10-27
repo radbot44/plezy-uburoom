@@ -48,12 +48,13 @@ class _JoinRoomDialogState extends State<JoinRoomDialog> {
   Future<void> _paste() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     if (!mounted) return;
-    final code = roomCodeIn(data?.text ?? '');
+    final uburoom = context.read<WatchTogetherProvider>().uburoomServerUrl != null;
+    final code = uburoom ? data?.text?.trim() : roomCodeIn(data?.text ?? '');
     if (code == null) {
       setState(() => _error = t.watchTogether.noCodeInClipboard);
       return;
     }
-    final text = owp.formatCode(code);
+    final text = uburoom || isUburoomRoomCode(code) ? code : owp.formatCode(code);
     _controller.value = TextEditingValue(
       text: text,
       selection: TextSelection.collapsed(offset: text.length),
@@ -64,12 +65,13 @@ class _JoinRoomDialogState extends State<JoinRoomDialog> {
 
   Future<void> _join() async {
     if (_joining) return;
-    final code = normalizeRoomCode(_controller.text);
+    final provider = context.read<WatchTogetherProvider>();
+    final uburoom = provider.uburoomServerUrl != null;
+    final code = uburoom ? _controller.text.trim() : normalizeRoomCode(_controller.text);
     if (code == null) {
       setState(() => _error = watchErrorText(owp.ErrorCode.invalidCode));
       return;
     }
-    final provider = context.read<WatchTogetherProvider>();
     setState(() {
       _joining = true;
       _error = null;
@@ -77,11 +79,23 @@ class _JoinRoomDialogState extends State<JoinRoomDialog> {
     try {
       await provider.joinRoom(code);
       if (mounted) Navigator.of(context).pop(true);
+    } on UburoomRoomException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _joining = false;
+        _error = error.message;
+      });
     } on owp.PartyException catch (error) {
       if (!mounted) return;
       setState(() {
         _joining = false;
         if (error.code != owp.ErrorCode.cancelled) _error = watchErrorText(error.code);
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _joining = false;
+        _error = t.watchTogether.errors.generic;
       });
     }
   }
@@ -98,6 +112,7 @@ class _JoinRoomDialogState extends State<JoinRoomDialog> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final uburoom = context.watch<WatchTogetherProvider>().uburoomServerUrl != null;
     return PopScope<bool>(
       onPopInvokedWithResult: _onPopped,
       child: AlertDialog(
@@ -109,7 +124,7 @@ class _JoinRoomDialogState extends State<JoinRoomDialog> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Text(
-                t.watchTogether.enterRoomCode,
+                uburoom ? 'Enter an uburoom room name, ID, or link.' : t.watchTogether.enterRoomCode,
                 style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
               ),
               const SizedBox(height: 16),
@@ -122,11 +137,11 @@ class _JoinRoomDialogState extends State<JoinRoomDialog> {
                 enableSuggestions: false,
                 textCapitalization: TextCapitalization.characters,
                 textInputAction: TextInputAction.go,
-                inputFormatters: const [RoomCodeInputFormatter()],
+                inputFormatters: uburoom ? const [] : const [RoomCodeInputFormatter()],
                 style: theme.textTheme.titleLarge?.copyWith(fontFamily: 'monospace', letterSpacing: 2),
                 decoration: InputDecoration(
-                  labelText: t.watchTogether.roomCode,
-                  hintText: 'K7M-Q2X',
+                  labelText: uburoom ? 'Room name, ID, or link' : t.watchTogether.roomCode,
+                  hintText: uburoom ? 'Room ID or link' : 'K7M-Q2X',
                   errorText: _error,
                   errorMaxLines: 3,
                   prefixIcon: const AppIcon(Symbols.tag_rounded),

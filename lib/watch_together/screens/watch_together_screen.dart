@@ -19,7 +19,9 @@ import '../../widgets/loading_indicator_box.dart';
 import '../../widgets/overlay_sheet.dart';
 import '../providers/watch_together_provider.dart';
 import '../services/recent_rooms_service.dart';
+import '../services/watch_party_relays.dart';
 import '../widgets/join_session_dialog.dart';
+import '../widgets/uburoom_lobby.dart';
 import '../widgets/uburoom_auth_dialog.dart';
 import '../widgets/watch_labels.dart';
 import '../widgets/watch_room_sections.dart';
@@ -142,6 +144,9 @@ class _LobbyViewState extends State<_LobbyView> with MountedSetStateMixin {
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<WatchTogetherProvider>();
+    if (provider.uburoomServerUrl != null) {
+      return UburoomLobby(key: ValueKey(provider.uburoomServerUrl));
+    }
     final theme = Theme.of(context);
     final busy = widget.busyCode != null;
     final profileId = provider.profileId;
@@ -150,6 +155,7 @@ class _LobbyViewState extends State<_LobbyView> with MountedSetStateMixin {
         ? const <RecentRoom>[]
         : RecentRoomsService.getRecentRooms(profileId: profileId, relayScope: relayScope);
     final relay = provider.customRelayBaseUrl;
+    final server = provider.uburoomServerUrl;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -198,11 +204,17 @@ class _LobbyViewState extends State<_LobbyView> with MountedSetStateMixin {
         ),
         const SizedBox(height: 16),
         Text(
-          relay == null ? t.watchTogether.relayPublic : t.watchTogether.relayCustom(url: relay),
+          server != null
+              ? 'Rooms use your uburoom server: $server'
+              : relay == null
+              ? t.watchTogether.relayPublic
+              : t.watchTogether.relayCustom(url: relay),
           style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
           textAlign: TextAlign.center,
         ),
         const SizedBox(height: 8),
+        if (server == null)
+          const Text('To create or join uburoom rooms, sign in to your server below.', textAlign: TextAlign.center),
         Center(
           child: TextButton.icon(
             icon: const AppIcon(Symbols.dns_rounded, size: 18),
@@ -269,7 +281,7 @@ class _RecentRoomTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final code = owp.formatCode(room.code);
+    final code = isUburoomRoomCode(room.code) ? room.code : owp.formatCode(room.code);
     final name = room.name;
     return Padding(
       padding: const EdgeInsets.only(bottom: 4),
@@ -308,7 +320,7 @@ class _RecentRoomTile extends StatelessWidget {
       OverlaySheetController.showAdaptive<void>(
         context,
         builder: (_) => AppMenuSheet<String>(
-          title: room.name ?? owp.formatCode(room.code),
+          title: room.name ?? (isUburoomRoomCode(room.code) ? room.code : owp.formatCode(room.code)),
           focusFirstItem: true,
           entries: [
             AppMenuItem(value: 'rename', icon: Symbols.edit_rounded, label: t.watchTogether.renameRoom),
@@ -364,7 +376,9 @@ class _RenameRoomDialogState extends State<_RenameRoomDialog> {
         controller: _controller,
         focusNode: _fieldFocusNode,
         autofocus: true,
-        decoration: InputDecoration(hintText: owp.formatCode(widget.room.code)),
+        decoration: InputDecoration(
+          hintText: isUburoomRoomCode(widget.room.code) ? widget.room.code : owp.formatCode(widget.room.code),
+        ),
         onNavigateDown: _saveFocusNode.requestFocus,
         onSubmitted: (value) => Navigator.pop(context, value),
       ),

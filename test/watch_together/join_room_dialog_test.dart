@@ -79,6 +79,14 @@ Future<void> _join(WidgetTester tester) async {
 String? _focus() => FocusManager.instance.primaryFocus?.debugLabel;
 
 void main() {
+  test('uburoom room links preserve the complete room ID', () {
+    expect(roomCodeIn('https://watch.example/room/abcdef12'), 'abcdef12');
+    expect(roomCodeIn('https://watch.example/?room=abcdef12'), 'abcdef12');
+    expect(
+      roomCodeIn('https://watch.example/room/12345678-abcd-1234-abcd-123456789abc'),
+      '12345678-abcd-1234-abcd-123456789abc',
+    );
+  });
   setUp(() async {
     resetSharedPreferencesForTest();
     SettingsService.resetForTesting();
@@ -93,6 +101,15 @@ void main() {
     PlatformDetector.debugSetIsDesktopOSOverride(null);
     TvDetectionService.debugSetAppleTVOverride(null);
     BackKeyCoordinator.clear();
+  });
+
+  _dialogTest('uburoom accepts full IDs and links without truncation', (tester, world) async {
+    await SettingsService.instance.write(SettingsService.uburoomServerUrl, 'https://watch.example');
+    await _openDialog(tester, world.guest());
+    expect(await _type(tester, 'abcdef12'), 'abcdef12');
+    const link = 'https://watch.example/room/12345678-abcd-1234-abcd-123456789abc';
+    expect(await _type(tester, link), link);
+    expect(find.text('Enter an uburoom room name, ID, or link.'), findsOneWidget);
   });
 
   _dialogTest('a typed code shows as K7M-Q2X: upper case, separators dropped, six symbols at most', (

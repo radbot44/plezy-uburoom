@@ -47,6 +47,7 @@ void main() {
               'id': 'hid-123',
               'code': 'ABCD-1234',
               'proof': 'proof-123',
+              'verification': '123456',
               'url': 'http://localhost:6767/native-handoff.html?handoffId=hid-123',
             }),
             200,
@@ -62,6 +63,8 @@ void main() {
       expect(session.handoffId, 'hid-123');
       expect(session.code, 'ABCD-1234');
       expect(session.proof, 'proof-123');
+      expect(session.verification, '123456');
+      expect(session.displayCode, '123 456');
       expect(session.verificationUrl, 'http://localhost:6767/native-handoff.html?handoffId=hid-123');
     });
 

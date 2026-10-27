@@ -16,6 +16,7 @@ class NativeHandoffSession {
     required this.code,
     required this.proof,
     required this.verificationUrl,
+    this.verification,
   });
 
   final String serverUrl;
@@ -23,6 +24,17 @@ class NativeHandoffSession {
   final String code;
   final String proof;
   final String verificationUrl;
+  final String? verification;
+
+  String get displayCode {
+    if (verification != null && verification!.isNotEmpty) {
+      if (verification!.length == 6) {
+        return '${verification!.substring(0, 3)} ${verification!.substring(3)}';
+      }
+      return verification!;
+    }
+    return code;
+  }
 }
 
 /// Manages authentication against an uburoom server using either browser handoff (Option 1A)
@@ -85,6 +97,7 @@ class UburoomAuthService {
       handoffId: (json['id'] ?? json['handoff']) as String,
       code: json['code'] as String,
       proof: (json['proof'] as String?) ?? '',
+      verification: json['verification'] as String?,
       verificationUrl: (json['url'] ?? json['verificationUrl']) as String,
     );
 

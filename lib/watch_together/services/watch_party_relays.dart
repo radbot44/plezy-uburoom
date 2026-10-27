@@ -60,6 +60,16 @@ bool isUburoomRoomCode(String code) => _uuidPattern.hasMatch(code) || _hex8Patte
 
 String? normalizeRoomCode(String input) {
   final trimmed = input.trim();
+  final uri = Uri.tryParse(trimmed);
+  if (uri != null && (uri.scheme == 'https' || uri.scheme == 'http') && uri.host.isNotEmpty) {
+    final candidates = [...uri.pathSegments.reversed, ?uri.queryParameters['room'], ?uri.queryParameters['roomId']];
+    for (final candidate in candidates) {
+      if (_hex8Pattern.hasMatch(candidate) || (_uuidPattern.firstMatch(candidate)?.group(0) == candidate)) {
+        return candidate.toLowerCase();
+      }
+    }
+    return null;
+  }
   final uuidMatch = _uuidPattern.firstMatch(trimmed);
   if (uuidMatch != null) return uuidMatch.group(0)!.toLowerCase();
   if (_hex8Pattern.hasMatch(trimmed)) return trimmed.toLowerCase();

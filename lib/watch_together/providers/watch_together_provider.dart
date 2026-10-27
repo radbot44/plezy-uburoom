@@ -58,6 +58,13 @@ class WatchPlayerHooks {
 ///
 /// The provider lives in the profile session, so a profile switch disposes of
 /// it and the party with it.
+class UburoomRoomException implements Exception {
+  const UburoomRoomException(this.message);
+  final String message;
+  @override
+  String toString() => message;
+}
+
 class WatchTogetherProvider extends ChangeNotifier {
   /// Without [clientFor] and [findCopies] the user has no libraries: other
   /// participants' media finds nothing (widget tests that only need a room).
@@ -180,7 +187,11 @@ class WatchTogetherProvider extends ChangeNotifier {
   bool get isReconnecting => connection == owp.Connection.reconnecting;
   owp.Room? get room => isInSession ? _state.room : null;
   String? get roomCode => room?.code;
-  String? get formattedRoomCode => roomCode == null ? null : owp.formatCode(roomCode!);
+  String? get formattedRoomCode => roomCode == null
+      ? null
+      : isUburoomRoomCode(roomCode!)
+      ? roomCode
+      : owp.formatCode(roomCode!);
   List<owp.Participant> get participants => room?.participants ?? const [];
   int get participantCount => participants.length;
   String? get myPeerId => _state.peerId;
@@ -249,7 +260,12 @@ class WatchTogetherProvider extends ChangeNotifier {
   }
 
   /// The relay setting's scope, for recent rooms.
-  String get relayScope => relayScopeOf(_customRelayBaseUrl());
+  String get relayScope =>
+      uburoomServerUrl == null ? relayScopeOf(_customRelayBaseUrl()) : 'uburoom:${relayScopeOf(uburoomServerUrl)}';
+
+  String? get uburoomServerUrl => _authService.serverUrl;
+
+  void refreshServerSettings() => notifyListeners();
 
   /// The self-hosted relay's base URL rooms use; null for the public relays.
   String? get customRelayBaseUrl => _customRelayBaseUrl();
@@ -276,9 +292,9 @@ class WatchTogetherProvider extends ChangeNotifier {
 
   /// Creates a room and joins it as host; returns its code. Throws
   /// [owp.PartyException] with the SDK's code when it fails.
-  Future<String> createRoom() async {
+  Future<String> createRoom({String? name}) async {
     if (_authService.serverUrl != null) {
-      return await _createUburoomRoom();
+      return await _createUburoomRoom(name: name);
     }
     final party = await _newParty();
     final code = await party.create();
@@ -292,6 +308,26 @@ class WatchTogetherProvider extends ChangeNotifier {
   /// it as after [createRoom]. Throws [owp.PartyException] with the SDK's
   /// code when it fails.
   Future<void> joinRoom(String code, {bool create = false}) async {
+    if (_authService.serverUrl != null) {
+      final normalized = normalizeRoomCode(code);
+      if (normalized != null && isUburoomRoomCode(normalized) && normalized.length == 36) {
+        await _joinUburoomRoom(normalized);
+      } else {
+        final rooms = await listUburoomRooms();
+        final matches = rooms
+            .where((room) => room['name']?.toString().toLowerCase() == code.trim().toLowerCase())
+            .toList();
+        if (matches.length != 1) {
+          throw UburoomRoomException(
+            matches.isEmpty
+                ? 'No accessible uburoom room has that name. Select a room from the list or paste its full link.'
+                : 'Several rooms have that name. Select the room from the list.',
+          );
+        }
+        await openUburoomRoom(matches.single);
+      }
+      return;
+    }
     final normalized = normalizeRoomCode(code);
     if (normalized != null && (isUburoomRoomCode(normalized) || _authService.serverUrl != null)) {
       await _joinUburoomRoom(normalized, create: create);
@@ -885,36 +921,90 @@ class WatchTogetherProvider extends ChangeNotifier {
     }
   }
 
-  Future<String> _createUburoomRoom() async {
-    await _closeParty();
+  Future<UburoomSocketService>? _connectingUburoom;
 
+  Future<UburoomSocketService> _connectUburoom() async {
+    if (_connectingUburoom != null) return _connectingUburoom!;
+    final pending = _connectUburoomOnce();
+    _connectingUburoom = pending;
+    try {
+      return await pending;
+    } finally {
+      _connectingUburoom = null;
+    }
+  }
+
+  Future<UburoomSocketService> _connectUburoomOnce() async {
     final serverUrl = _authService.serverUrl;
     final token = await _authService.getToken();
     if (serverUrl == null || token == null) {
-      throw const owp.PartyException(
-        owp.ErrorCode.invalidCode,
-        'Uburoom credentials missing; sign in to Uburoom first',
-      );
+      throw const UburoomRoomException('Sign in to your uburoom server first.');
     }
-
-    var socket = _socketService;
-    if (socket == null || !socket.isConnected) {
-      socket ??= UburoomSocketService(clockSync: _clockSync);
-      _socketService = socket;
+    final socket = _socketService ??= UburoomSocketService(clockSync: _clockSync);
+    if (!socket.isConnected || socket.serverUrl != serverUrl || socket.token != token) {
       await socket.connect(serverUrl: serverUrl, token: token);
     }
-
-    final name = _sanitizedName(_displayName());
-    final res = await socket.sendRequest('/api/rooms', {'name': name});
-    if (!res.isSuccess) {
-      final errMsg = (res.value is Map) ? res.value['error']?.toString() : null;
-      throw owp.PartyException(owp.ErrorCode.invalidCode, errMsg ?? 'Failed to create uburoom room');
+    if (!socket.isConnected) {
+      throw const UburoomRoomException('Could not connect to uburoom. Check the server address and sign in again.');
     }
+    return socket;
+  }
 
-    final String roomId = (res.value is Map) ? (res.value['id'] as String? ?? '') : '';
-    if (roomId.isEmpty) {
-      throw const owp.PartyException(owp.ErrorCode.invalidCode, 'Invalid room returned from uburoom');
+  Map<String, dynamic> _uburoomValue(UburoomResponse response) {
+    if (!response.isSuccess) {
+      throw UburoomRoomException(
+        response.value is Map
+            ? response.value['error']?.toString() ?? 'Uburoom request failed (${response.status}).'
+            : 'Uburoom request failed (${response.status}).',
+      );
     }
+    if (response.value is! Map<String, dynamic>) throw const UburoomRoomException('Invalid response from uburoom.');
+    return response.value as Map<String, dynamic>;
+  }
+
+  Future<List<Map<String, dynamic>>> listUburoomRooms() async {
+    final socket = await _connectUburoom();
+    final active = _uburoomValue(await socket.sendRequest('/api/watch/rooms'));
+    final rooms = <String, Map<String, dynamic>>{};
+    for (final room in (active['rooms'] as List? ?? const [])) {
+      if (room is Map<String, dynamic> && room['locked'] != true) {
+        rooms[room['id'] as String] = {...room, 'active': true};
+      }
+    }
+    var offset = 0;
+    while (true) {
+      final saved = _uburoomValue(await socket.sendRequest('/api/watch/rooms/saved?offset=$offset'));
+      final page = saved['rooms'] as List? ?? const [];
+      for (final room in page.whereType<Map<String, dynamic>>()) {
+        rooms.putIfAbsent(room['id'] as String, () => room);
+      }
+      offset += page.length;
+      if (page.isEmpty || offset >= (saved['total'] as num? ?? offset)) break;
+    }
+    return rooms.values.toList();
+  }
+
+  Future<void> openUburoomRoom(Map<String, dynamic> room) async {
+    final id = room['id'] as String;
+    if (room['active'] == false) {
+      final socket = await _connectUburoom();
+      _uburoomValue(await socket.sendRequest('/api/watch/rooms/$id/reopen', {}));
+    }
+    await _joinUburoomRoom(id);
+  }
+
+  Future<String> _createUburoomRoom({String? name}) async {
+    await _closeParty();
+
+    final socket = await _connectUburoom();
+    final value = _uburoomValue(
+      await socket.sendRequest('/api/watch/rooms', {
+        'name': name?.trim().isNotEmpty == true ? name!.trim() : _sanitizedName(_displayName()),
+        'visibility': 'public',
+      }),
+    );
+    final roomId = value['id'] as String?;
+    if (roomId == null || roomId.isEmpty) throw const UburoomRoomException('Uburoom did not return a room ID.');
 
     await _joinUburoomRoom(roomId, create: true);
     return roomId;
@@ -923,21 +1013,9 @@ class WatchTogetherProvider extends ChangeNotifier {
   Future<void> _joinUburoomRoom(String roomId, {bool create = false}) async {
     await _closeParty();
 
-    final serverUrl = _authService.serverUrl;
+    final socket = await _connectUburoom();
+    final serverUrl = _authService.serverUrl!;
     final token = await _authService.getToken();
-    if (serverUrl == null || token == null) {
-      throw const owp.PartyException(
-        owp.ErrorCode.invalidCode,
-        'Uburoom credentials missing; sign in to Uburoom first',
-      );
-    }
-
-    var socket = _socketService;
-    if (socket == null || !socket.isConnected) {
-      socket ??= UburoomSocketService(clockSync: _clockSync);
-      _socketService = socket;
-      await socket.connect(serverUrl: serverUrl, token: token);
-    }
 
     unawaited(_uburoomStateSub?.cancel());
     _uburoomStateSub = socket.roomStateStream.listen(_onUburoomStatePush);
@@ -946,17 +1024,13 @@ class WatchTogetherProvider extends ChangeNotifier {
 
     final delivery = (_player != null) ? 'local' : 'auto';
     final res = await socket.sendRequest('/api/watch/rooms/$roomId?viewer=$_viewerId&quality=auto&delivery=$delivery');
-    if (!res.isSuccess) {
-      final errMsg = (res.value is Map) ? res.value['error']?.toString() : null;
-      throw owp.PartyException(owp.ErrorCode.invalidCode, errMsg ?? 'Failed to join uburoom room');
-    }
+    final snapshot = _uburoomValue(res);
 
     _uburoomRoomId = roomId;
     _uburoomServerUrl = serverUrl;
     _uburoomToken = token;
     await _rememberRoom(roomId);
 
-    final snapshot = res.value as Map<String, dynamic>;
     _handleUburoomSnapshot(snapshot);
 
     final player = _player;
@@ -1019,19 +1093,24 @@ class WatchTogetherProvider extends ChangeNotifier {
         ? owp.Phase.idle
         : (waitingForReady ? owp.Phase.waiting : (paused ? owp.Phase.paused : owp.Phase.playing));
 
-    final viewersList = (snapshot['viewers'] as List<dynamic>?) ?? const [];
+    // The server sends a viewer count and a separate participant list.
+    final viewersList = snapshot['participants'] is List
+        ? snapshot['participants'] as List
+        : snapshot['viewers'] is List
+        ? snapshot['viewers'] as List
+        : const [];
     final participants = viewersList.map<owp.Participant>((v) {
       final vMap = v as Map<String, dynamic>;
-      final userId = vMap['userId'] as String? ?? 'user';
+      final userId = (vMap['id'] ?? vMap['userId']) as String? ?? 'user';
       final name = vMap['name'] as String? ?? 'Viewer';
-      final isHost = vMap['isHost'] as bool? ?? false;
+      final isHost = vMap['role'] == 'host' || vMap['role'] == 'creator' || vMap['isHost'] == true;
       final ready = vMap['ready'] as bool? ?? false;
       return owp.Participant(
         peerId: userId,
         name: name,
         client: 'plezy-uburoom',
         host: isHost,
-        connected: true,
+        connected: vMap['present'] != false,
         player: ready ? owp.PlayerState.ready : owp.PlayerState.loading,
         match: const owp.Match(owp.MatchState.matched),
         offsetMs: 0,
