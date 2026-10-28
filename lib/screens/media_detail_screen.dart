@@ -39,6 +39,7 @@ import '../media/media_source_info.dart';
 import '../media/media_rating.dart';
 import '../media/media_role.dart';
 import '../media/paged_media_list_state.dart';
+import '../watch_together/providers/watch_together_provider.dart';
 import '../widgets/media_card.dart';
 import '../widgets/media_rating_badge.dart';
 import '../widgets/fitted_metadata_line.dart';

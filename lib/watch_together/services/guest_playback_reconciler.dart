@@ -66,7 +66,8 @@ class GuestPlaybackReconciler {
   bool _paused = true;
   double _roomRate = 1.0;
   bool _waitingForReady = false;
-  Object? _readinessVersion;
+  dynamic _readinessVersion;
+  bool _seekInFlight = false;
 
   int _lastSeekAt = 0;
   double _currentSlewRate = 1.0;
@@ -80,6 +81,7 @@ class GuestPlaybackReconciler {
   int get frames => _frames;
   String get observationEpoch => _observationEpoch;
   String get epoch => _epoch;
+  String? get readinessVersion => _readinessVersion;
 
   void updateRoomSnapshot(Map<String, dynamic> snapshot) {
     _lastSnapshot = snapshot;
@@ -92,11 +94,23 @@ class GuestPlaybackReconciler {
 
     final newMediaVersion = (snapshot['mediaVersion'] ?? room['mediaVersion']) as String? ?? '';
     final newStreamVersion = (snapshot['streamVersion'] ?? room['streamVersion']) as String? ?? '';
+    final newReadinessVersion =
+        snapshot['readinessVersion'] ?? (snapshot['readiness'] as Map<String, dynamic>?)?['version'];
+    final newWaitingForReady = snapshot['waitingForReady'] as bool? ?? false;
+    final waitingTransition = !_waitingForReady && newWaitingForReady;
 
-    if (newMediaVersion != _mediaVersion || newStreamVersion != _streamVersion) {
+    if (newMediaVersion != _mediaVersion ||
+        newStreamVersion != _streamVersion ||
+        newReadinessVersion != _readinessVersion ||
+        waitingTransition) {
       _mediaVersion = newMediaVersion;
       _streamVersion = newStreamVersion;
+      _readinessVersion = newReadinessVersion;
       _readySentForCurrentVersion = false;
+    } else {
+      _mediaVersion = newMediaVersion;
+      _streamVersion = newStreamVersion;
+      _readinessVersion = newReadinessVersion;
     }
 
     final newObsEpoch = (snapshot['observationEpoch'] as String?) ?? '';
@@ -112,8 +126,7 @@ class GuestPlaybackReconciler {
     _paused = stateObj?['paused'] as bool? ?? (snapshot['paused'] as bool? ?? true);
     _roomRate = (stateObj?['rate'] as num?)?.toDouble() ?? 1.0;
 
-    _waitingForReady = snapshot['waitingForReady'] as bool? ?? false;
-    _readinessVersion = snapshot['readinessVersion'] ?? (snapshot['readiness'] as Map<String, dynamic>?)?['version'];
+    _waitingForReady = newWaitingForReady;
 
     _handleReadinessGate();
     _handleStartCountdown();
@@ -152,7 +165,33 @@ class GuestPlaybackReconciler {
     if (_disposed || !_waitingForReady || _readySentForCurrentVersion) return;
     if (_mediaVersion.isEmpty) return;
 
-    if (adapter.firstFrameShown && !adapter.isHeld) {
+    if (!adapter.paused) unawaited(adapter.pause());
+
+    final targetPos = targetPositionMs;
+    final driftMs = adapter.positionMs - targetPos;
+    final threshold = _readinessVersion != null ? 50 : 250;
+
+    final now = clockSync.serverNow;
+    if (driftMs.abs() > threshold && !_seekInFlight && now - _lastSeekAt > 400) {
+      _lastSeekAt = now;
+      _seekInFlight = true;
+      _discontinuity++;
+      unawaited(
+        adapter.seek(targetPos).whenComplete(() {
+          _seekInFlight = false;
+          _handleReadinessGate();
+        }),
+      );
+      return;
+    }
+
+    final isLoaded =
+        (adapter.firstFrameShown || adapter.player.state.seekable || adapter.durationMs != null) &&
+        !adapter.isHeld &&
+        !adapter.buffering &&
+        !_seekInFlight;
+
+    if (isLoaded && driftMs.abs() <= 500) {
       _readySentForCurrentVersion = true;
       unawaited(_sendReady());
     }
@@ -160,12 +199,17 @@ class GuestPlaybackReconciler {
 
   Future<void> _sendReady() async {
     try {
-      await socketService.sendRequest('/api/watch/rooms/$roomId/ready', {
+      final res = await socketService.sendRequest('/api/watch/rooms/$roomId/ready', {
         'viewerId': viewerId,
         'mediaVersion': _mediaVersion,
         'ready': true,
         if (_readinessVersion != null) 'readinessVersion': _readinessVersion,
       });
+      if (!res.isSuccess) {
+        _readySentForCurrentVersion = false;
+        appLogger.w('GuestPlaybackReconciler: sendReady returned status ${res.status}: ${res.value}');
+        return;
+      }
       appLogger.d('GuestPlaybackReconciler: sent ready for mediaVersion=$_mediaVersion');
     } catch (e) {
       appLogger.w('GuestPlaybackReconciler: sendReady failed: $e');
@@ -200,6 +244,10 @@ class GuestPlaybackReconciler {
     final serverTime = clockSync.serverNow;
     final int? serverNow = snapshot['serverNow'] as int?;
     if (serverNow == null) {
+      final stateObj = snapshot['state'] as Map<String, dynamic>?;
+      if (stateObj != null && stateObj['position'] is num) {
+        return ((stateObj['position'] as num).toDouble() * 1000).round();
+      }
       if (_paused) return math.max(0, _pauseAt);
       final int startAt = snapshot['startAt'] as int? ?? _startAt;
       if (serverTime < startAt) return 0;
@@ -233,16 +281,40 @@ class GuestPlaybackReconciler {
   void _tick() {
     if (_disposed || adapter.isReleased || _lastSnapshot == null) return;
 
+    final now = clockSync.serverNow;
+
     if (_waitingForReady) {
-      if (!_readySentForCurrentVersion && adapter.firstFrameShown && !adapter.isHeld) {
+      if (!adapter.paused) unawaited(adapter.pause());
+
+      final targetPos = targetPositionMs;
+      final driftMs = adapter.positionMs - targetPos;
+      final threshold = _readinessVersion != null ? 50 : 250;
+
+      if (driftMs.abs() > threshold && !_seekInFlight && now - _lastSeekAt > 400) {
+        _lastSeekAt = now;
+        _seekInFlight = true;
+        _discontinuity++;
+        unawaited(
+          adapter.seek(targetPos).whenComplete(() {
+            _seekInFlight = false;
+          }),
+        );
+        return;
+      }
+
+      final isLoaded =
+          (adapter.firstFrameShown || adapter.player.state.seekable || adapter.durationMs != null) &&
+          !adapter.isHeld &&
+          !adapter.buffering &&
+          !_seekInFlight;
+
+      if (!_readySentForCurrentVersion && isLoaded && driftMs.abs() <= 500) {
         _readySentForCurrentVersion = true;
         unawaited(_sendReady());
       }
-      if (!adapter.paused) unawaited(adapter.pause());
       return;
     }
 
-    final now = clockSync.serverNow;
     if (_startAt > now) return;
 
     final targetPos = targetPositionMs;
@@ -251,10 +323,15 @@ class GuestPlaybackReconciler {
 
     if (_paused) {
       if (!adapter.paused) unawaited(adapter.pause());
-      if (driftMs.abs() > 500 && now - _lastSeekAt > 1500) {
+      if (driftMs.abs() > 500 && now - _lastSeekAt > 1500 && !_seekInFlight) {
         _lastSeekAt = now;
+        _seekInFlight = true;
         _discontinuity++;
-        unawaited(adapter.seek(targetPos));
+        unawaited(
+          adapter.seek(targetPos).whenComplete(() {
+            _seekInFlight = false;
+          }),
+        );
       }
       return;
     }
@@ -280,14 +357,19 @@ class GuestPlaybackReconciler {
       return;
     }
 
-    if (now - _lastSeekAt > 1500 && !adapter.buffering && !adapter.isHeld) {
+    if (now - _lastSeekAt > 1500 && !adapter.buffering && !adapter.isHeld && !_seekInFlight) {
       _lastSeekAt = now;
+      _seekInFlight = true;
       _discontinuity++;
       if (_currentSlewRate != 1.0 && adapter.canSetRate) {
         _currentSlewRate = 1.0;
         unawaited(adapter.setRate(_roomRate));
       }
-      unawaited(adapter.seek(targetPos));
+      unawaited(
+        adapter.seek(targetPos).whenComplete(() {
+          _seekInFlight = false;
+        }),
+      );
     }
   }
 

@@ -86,6 +86,7 @@ class UburoomRoomState {
     this.isHost = false,
     this.canPlayback = false,
     this.canManage = false,
+    this.durable = false,
     this.viewersCount = 0,
     this.participants = const [],
     this.deliveryMode = 'auto',
@@ -115,6 +116,7 @@ class UburoomRoomState {
   final bool isHost;
   final bool canPlayback;
   final bool canManage;
+  final bool durable;
   final int viewersCount;
   final List<UburoomParticipant> participants;
   final String deliveryMode;
@@ -175,6 +177,7 @@ class UburoomRoomState {
       isHost: snapshot['isHost'] as bool? ?? false,
       canPlayback: snapshot['canPlayback'] as bool? ?? false,
       canManage: snapshot['canManage'] as bool? ?? false,
+      durable: snapshot['durable'] == true || snapshot['saved'] == true,
       viewersCount: snapshot['viewers'] is int ? snapshot['viewers'] as int : participants.length,
       participants: participants,
       deliveryMode: deliveryMode,

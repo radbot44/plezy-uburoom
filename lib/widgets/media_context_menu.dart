@@ -52,6 +52,7 @@ import '../screens/music/album_detail_screen.dart';
 import '../screens/music/artist_detail_screen.dart';
 import '../utils/smart_deletion_handler.dart';
 import '../utils/video_player_navigation.dart';
+import '../watch_together/providers/watch_together_provider.dart';
 import '../utils/deletion_notifier.dart';
 import '../widgets/app_menu.dart';
 import '../widgets/deep_link_dialog.dart';
@@ -622,6 +623,9 @@ class MediaContextMenuState extends State<MediaContextMenu> {
     final hasActiveProgress = isMovieOrEpisode && mediaItem.hasActiveProgress;
     final isVideoKind = mediaItem.isVideoContent;
     final isUnmatched = _isUnmatched(mediaItem);
+    final watchTogether = context.watch<WatchTogetherProvider?>();
+    final inUburoom = watchTogether != null && watchTogether.isUburoomSession;
+    final canControlUburoom = inUburoom && (watchTogether.canControl || watchTogether.isHost);
 
     // Go to Series (for episodes and seasons) — hide if already on that series' detail screen
     final ancestorMeta = context.findAncestorWidgetOfExactType<MediaDetailScreen>()?.metadata;
@@ -632,6 +636,11 @@ class MediaContextMenuState extends State<MediaContextMenu> {
     final itemSeriesKey = mediaKind == MediaKind.episode ? mediaItem.grandparentId : mediaItem.parentId;
 
     return [
+      if (canControlUburoom && isMovieOrEpisode) ...[
+        _MenuAction(value: 'play_in_uburoom', icon: Symbols.groups_rounded, label: 'Play in Room'),
+        if (watchTogether.uburoomState?.durable == true)
+          _MenuAction(value: 'add_to_uburoom_queue', icon: Symbols.playlist_add_rounded, label: 'Add to Room Queue'),
+      ],
       if (mediaKind.isMusic) ..._musicMenuActions(context, menu, mediaItem),
       if (hasActiveProgress)
         _MenuAction(value: 'play_from_beginning', icon: Symbols.replay_rounded, label: t.mediaMenu.playFromBeginning),
@@ -886,6 +895,18 @@ class MediaContextMenuState extends State<MediaContextMenu> {
   }) async {
     final mediaItem = menu.mediaItem!;
     switch (selected) {
+      case 'play_in_uburoom':
+        if (context.mounted) {
+          final wt = context.read<WatchTogetherProvider?>();
+          await wt?.loadMediaInUburoom(mediaItem);
+        }
+        break;
+      case 'add_to_uburoom_queue':
+        if (context.mounted) {
+          final wt = context.read<WatchTogetherProvider?>();
+          await wt?.addMediaToUburoomQueue(mediaItem);
+        }
+        break;
       case 'play_from_beginning':
         outcome.didNavigate = true;
         if (context.mounted) {

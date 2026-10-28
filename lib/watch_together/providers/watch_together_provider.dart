@@ -659,7 +659,7 @@ class WatchTogetherProvider extends ChangeNotifier {
 
   /// For tests: pushes a snapshot through the Uburoom handler.
   @visibleForTesting
-  void handleUburoomSnapshotForTest(Map<String, dynamic> snapshot) => _handleUburoomSnapshot(snapshot);
+  void handleUburoomSnapshotForTest(Map<String, dynamic> snapshot) => unawaited(_handleUburoomSnapshot(snapshot));
 
   /// For tests: sends an Uburoom command.
   @visibleForTesting
@@ -691,6 +691,12 @@ class WatchTogetherProvider extends ChangeNotifier {
     if (previous != null && !identical(previous, adapter)) previous.release();
     _player = (adapter: adapter, shareable: shareable);
     if (isUburoomSession) {
+      if (!roomLaunch &&
+          adapter.copy.itemId != _uburoomState?.mediaId &&
+          adapter.copy.item != null &&
+          (canControl || isHost)) {
+        unawaited(loadMediaInUburoom(adapter.copy.item!));
+      }
       if (_uburoomReconciler != null && !identical(_uburoomReconciler!.adapter, adapter)) {
         _uburoomReconciler?.dispose();
         _uburoomReconciler = null;
@@ -994,6 +1000,52 @@ class WatchTogetherProvider extends ChangeNotifier {
       _notifyScheduled = false;
       if (!_disposed) super.notifyListeners();
     });
+  }
+
+  /// Loads media immediately into the current uburoom room.
+  Future<void> loadMediaInUburoom(MediaItem item, {String quality = 'direct'}) async {
+    final roomId = _uburoomRoomId;
+    final socket = _socketService;
+    if (roomId == null || socket == null || !socket.isConnected) return;
+    try {
+      if (_uburoomState?.durable == true) {
+        final res = await socket.sendRequest('/api/watch/rooms/$roomId/queue', {
+          'action': 'playNow',
+          'item': {
+            'serverId': item.serverId ?? '',
+            'mediaId': item.id,
+            'title': item.title ?? 'Untitled',
+            'type': item.kind == MediaKind.episode ? 'episode' : 'movie',
+            if (item.durationMs != null) 'duration': item.durationMs! / 1000.0,
+          },
+        });
+        if (res.isSuccess) return;
+      }
+      await _sendUburoomCommand('media.load', {'mediaId': item.id, 'quality': quality});
+    } catch (e) {
+      appLogger.w('WatchTogether: loadMediaInUburoom failed: $e');
+    }
+  }
+
+  /// Adds an item to the queue of a durable uburoom room.
+  Future<void> addMediaToUburoomQueue(MediaItem item) async {
+    final roomId = _uburoomRoomId;
+    final socket = _socketService;
+    if (roomId == null || socket == null || !socket.isConnected) return;
+    try {
+      await socket.sendRequest('/api/watch/rooms/$roomId/queue', {
+        'action': 'add',
+        'item': {
+          'serverId': item.serverId ?? '',
+          'mediaId': item.id,
+          'title': item.title ?? 'Untitled',
+          'type': item.kind == MediaKind.episode ? 'episode' : 'movie',
+          if (item.durationMs != null) 'duration': item.durationMs! / 1000.0,
+        },
+      });
+    } catch (e) {
+      appLogger.w('WatchTogether: addMediaToUburoomQueue failed: $e');
+    }
   }
 
   Future<void> _sendUburoomCommand(String action, [Map<String, dynamic>? args]) async {

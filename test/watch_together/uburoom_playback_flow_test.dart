@@ -58,7 +58,7 @@ class _SyncPlayer extends FakeSyncPlayer {
   _SyncPlayer({super.hasRenderedFrame});
 
   @override
-  PlayerStreams get streams => emptyPlayerStreams();
+  PlayerStreams get streams => emptyPlayerStreams(playbackRestart: super.streams.playbackRestart);
 }
 
 void main() {
@@ -347,5 +347,121 @@ void main() {
     final closeReq = socket.requests.firstWhere((r) => r['path'] == '/api/watch/rooms/room-uuid-1/close');
     expect(closeReq['data']?['epoch'], 'full-uuid-epoch-1234');
     expect(provider.isUburoomSession, isFalse);
+  });
+
+  test('loadMediaInUburoom dispatches media.load command with direct quality', () async {
+    final item = testMediaItem(id: '54321', title: 'Arrival');
+    await provider.loadMediaInUburoom(item);
+
+    final req = socket.requests.lastWhere((r) => r['path'] == '/api/watch/rooms/room-uuid-1/command');
+    final cmd = req['data']?['command'];
+    expect(cmd?['action'], 'media.load');
+    expect(cmd?['args']?['mediaId'], '54321');
+    expect(cmd?['args']?['quality'], 'direct');
+  });
+
+  test('loadMediaInUburoom in durable room uses queue playNow', () async {
+    provider.handleUburoomSnapshotForTest({
+      'id': 'room-uuid-1',
+      'durable': true,
+      'epoch': 'epoch-durable-1',
+      'state': {'position': 0, 'duration': 100, 'paused': true},
+    });
+
+    final item = testMediaItem(id: '67890', title: 'Interstellar');
+    await provider.loadMediaInUburoom(item);
+
+    final req = socket.requests.lastWhere((r) => r['path'] == '/api/watch/rooms/room-uuid-1/queue');
+    expect(req['data']?['action'], 'playNow');
+    expect(req['data']?['item']?['mediaId'], '67890');
+    expect(req['data']?['item']?['title'], 'Interstellar');
+  });
+
+  test('addMediaToUburoomQueue dispatches queue add action', () async {
+    final item = testMediaItem(id: '11223', title: 'Dune');
+    await provider.addMediaToUburoomQueue(item);
+
+    final req = socket.requests.lastWhere((r) => r['path'] == '/api/watch/rooms/room-uuid-1/queue');
+    expect(req['data']?['action'], 'add');
+    expect(req['data']?['item']?['mediaId'], '11223');
+    expect(req['data']?['item']?['title'], 'Dune');
+  });
+
+  test('playerOpened with different library item in room triggers loadMediaInUburoom', () async {
+    provider.handleUburoomSnapshotForTest({
+      'id': 'room-uuid-1',
+      'mediaId': '100',
+      'isHost': true,
+      'epoch': 'ep-1',
+      'state': {'position': 0, 'duration': 100, 'paused': true},
+    });
+
+    final player = _SyncPlayer(hasRenderedFrame: true);
+    final copy = WatchCopy(
+      serverId: 'srv',
+      itemId: '200',
+      versionId: '',
+      item: testMediaItem(id: '200', title: 'New Movie'),
+    );
+    final adapter = PlezyPlayerAdapter(
+      player: player,
+      copy: copy,
+      commands: PlayerCommands(play: () async {}, pause: () async {}, seek: (_) async {}, setRate: (_) async {}),
+    );
+
+    provider.playerOpened(adapter, shareable: true, roomLaunch: false);
+
+    final req = socket.requests.lastWhere((r) => r['path'] == '/api/watch/rooms/room-uuid-1/command');
+    expect(req['data']?['command']?['action'], 'media.load');
+    expect(req['data']?['command']?['args']?['mediaId'], '200');
+  });
+
+  test('reconciler seeks during waitingForReady and only sends ready after aligning to target position', () async {
+    int seekCallCount = 0;
+    int targetSeekPos = -1;
+
+    final player = _SyncPlayer(hasRenderedFrame: true);
+    final adapter = PlezyPlayerAdapter(
+      player: player,
+      copy: WatchCopy(
+        serverId: 'srv',
+        itemId: '1',
+        versionId: '',
+        item: testMediaItem(id: '1'),
+      ),
+      commands: PlayerCommands(
+        play: () async {},
+        pause: () async {},
+        seek: (Duration pos) async {
+          seekCallCount++;
+          targetSeekPos = pos.inMilliseconds;
+          await player.seek(pos);
+        },
+        setRate: (_) async {},
+      ),
+    );
+
+    provider.playerOpened(adapter, shareable: true, roomLaunch: false);
+
+    // Initial snapshot: room seeks to 50.0 seconds with readinessVersion UUID
+    provider.handleUburoomSnapshotForTest({
+      'id': 'room-uuid-1',
+      'mediaVersion': 'mv-1',
+      'streamVersion': 'sv-1',
+      'readinessVersion': 'seek-uuid-1234',
+      'waitingForReady': true,
+      'state': {'position': 50.0, 'duration': 100.0, 'paused': true},
+    });
+    await pumpEventQueue();
+
+    // Player starts at position 0, so drift is 50000 ms (> 50 ms threshold)
+    expect(seekCallCount, 1);
+    expect(targetSeekPos, 50000);
+
+    // Ready should now be sent for seek-uuid-1234 because drift is now 0 (<= 500)
+    final readyReq = socket.requests.firstWhere((r) => r['path'] == '/api/watch/rooms/room-uuid-1/ready');
+    expect(readyReq['data']?['mediaVersion'], 'mv-1');
+    expect(readyReq['data']?['readinessVersion'], 'seek-uuid-1234');
+    expect(readyReq['data']?['ready'], isTrue);
   });
 }

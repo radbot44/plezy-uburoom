@@ -161,9 +161,10 @@ class PlaybackOpenOutcome {
       _restartDeadline();
       return;
     }
-    if (!_loadStarted) return;
+    _loadStarted = true;
     _complete(_primaryMediaReady, true);
     _complete(_fileLoaded, true);
+    _complete(_firstFrame, true);
     _restartDeadline();
   }
 
@@ -172,7 +173,7 @@ class PlaybackOpenOutcome {
   }
 
   void _onPlaybackRestart() {
-    if (!_loadStarted) return;
+    _loadStarted = true;
     _complete(_primaryMediaReady, true);
     _complete(_fileLoaded, true);
     _complete(_firstFrame, true);

@@ -62,6 +62,18 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
 
     Future<void> onPlayPressed() async {
       if (!_canUseDetail) return;
+      final watchTogether = context.read<WatchTogetherProvider?>();
+      if (watchTogether != null &&
+          watchTogether.isUburoomSession &&
+          (watchTogether.canControl || watchTogether.isHost)) {
+        final targetItem = metadata.isShow
+            ? (_showPlayEpisode() ?? (_episodes.isNotEmpty ? _episodes.first : null))
+            : (metadata.isSeason ? (_episodes.isNotEmpty ? _episodes.first : null) : metadata);
+        if (targetItem != null) {
+          await watchTogether.loadMediaInUburoom(targetItem);
+          return;
+        }
+      }
       // For TV shows, play the episode the hero describes (focused on TV,
       // otherwise on-deck); with neither, the first episode of the first season.
       if (metadata.isShow) {

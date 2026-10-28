@@ -62,10 +62,8 @@ class PlaybackSourceResolver {
         streamHeaders: headers,
       );
     }
-    final reportingClient = suppressServerReporting
-        ? null
-        : _playbackClient(serverIdOrNull(metadata.serverId), offlineLibraryMode: offlineLibraryMode);
-    final service = PlaybackInitializationService(client: reportingClient, database: database);
+    final playbackClient = _playbackClient(serverIdOrNull(metadata.serverId), offlineLibraryMode: offlineLibraryMode);
+    final service = PlaybackInitializationService(client: playbackClient, database: database);
     final result = await service.getPlaybackData(
       options,
       preferOffline: offlineLibraryMode || options.qualityPreset.isOriginal || downloadOutranksQuality,
@@ -77,9 +75,10 @@ class PlaybackSourceResolver {
         : result.isTranscoding
         ? PlaybackSourceKind.remoteTranscode
         : PlaybackSourceKind.remoteDirect;
+    final reportingClient = suppressServerReporting ? null : playbackClient;
     final reportingMode = suppressServerReporting
         ? PlaybackReportingMode.disabled
-        : _reportingMode(sourceKind: sourceKind, client: reportingClient, offlineLibraryMode: offlineLibraryMode);
+        : _reportingMode(sourceKind: sourceKind, client: playbackClient, offlineLibraryMode: offlineLibraryMode);
     return PlaybackContext(
       metadata: metadata,
       result: result,
@@ -87,7 +86,7 @@ class PlaybackSourceResolver {
       reportingMode: reportingMode,
       reportingClient: reportingClient,
       streamHeaders: _streamHeaders(
-        client: reportingClient,
+        client: playbackClient,
         sourceKind: sourceKind,
         sessionIdentifier: options.sessionIdentifier,
         trackStreamUrl: metadata.kind == MediaKind.track ? result.videoUrl : null,

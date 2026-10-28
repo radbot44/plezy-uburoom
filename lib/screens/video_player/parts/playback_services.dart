@@ -253,6 +253,15 @@ extension _VideoPlayerPlaybackServiceMethods on VideoPlayerScreenState {
     }
 
     _playerStreamSubscriptions.add(
+      currentPlayer.streams.fileLoaded.listen((_) async {
+        if (!mounted || player != currentPlayer) return;
+        if (!_firstFrame.rendered) {
+          await _markFirstFrameReady(currentPlayer, settingsService);
+        }
+      }),
+    );
+
+    _playerStreamSubscriptions.add(
       currentPlayer.streams.playbackRestart.listen((_) async {
         if (!mounted || player != currentPlayer) return;
         _lastLogError = null;
