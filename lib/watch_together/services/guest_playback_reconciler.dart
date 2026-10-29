@@ -7,7 +7,8 @@ import 'player_adapter.dart';
 import 'uburoom_socket_service.dart';
 
 /// Server-authoritative playback reconciler for an uburoom room viewer.
-/// Reconciles local [PlezyPlayerAdapter] against uburoom's timeline.
+/// Reconciles local [PlezyPlayerAdapter] against uburoom's timeline using
+/// an uncertainty-aware hysteresis proportional controller matching web viewers.
 class GuestPlaybackReconciler {
   GuestPlaybackReconciler({
     required this.adapter,
@@ -15,9 +16,12 @@ class GuestPlaybackReconciler {
     required this.socketService,
     required this.roomId,
     required this.viewerId,
+    this.listenToRoomStateStream = true,
   }) {
-    _stateSub = socketService.roomStateStream.listen(_onRoomStatePush);
-    _tickTimer = Timer.periodic(const Duration(milliseconds: 250), (_) => _tick());
+    if (listenToRoomStateStream) {
+      _stateSub = socketService.roomStateStream.listen(_onRoomStatePush);
+    }
+    _tickTimer = Timer.periodic(const Duration(milliseconds: 100), (_) => _tick());
     _observeTimer = Timer.periodic(const Duration(milliseconds: 1000), (_) => _dispatchObservation());
     _syncQualityTimer = Timer.periodic(const Duration(milliseconds: 1000), (_) => _dispatchSyncQuality());
 
@@ -28,11 +32,21 @@ class GuestPlaybackReconciler {
 
   static final _uuidPattern = RegExp(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$');
 
+  /// Proportional gain for micro-PLL rate adjustment (5% per 1000ms of drift,
+  /// reaching ±4.0% at 800ms drift).
+  static const double _kP = 0.00005;
+  static const double _minSlewDelta = 0.005;
+  static const double _maxSlewDelta = 0.04;
+  static const int _hardSeekThresholdMs = 2000;
+  static const int _baseSeekCooldownMs = 1500;
+  static const int _maxSeekBackoffMs = 6000;
+
   final PlezyPlayerAdapter adapter;
   final ClockSync clockSync;
   final UburoomSocketService socketService;
   final String roomId;
   final String viewerId;
+  final bool listenToRoomStateStream;
 
   StreamSubscription? _stateSub;
   StreamSubscription? _playingSub;
@@ -45,6 +59,7 @@ class GuestPlaybackReconciler {
   Timer? _startTimer;
 
   Map<String, dynamic>? _lastSnapshot;
+  int _snapshotServerTime = 0;
   String _epoch = '';
   int _revision = 0;
   String _mediaVersion = '';
@@ -70,21 +85,40 @@ class GuestPlaybackReconciler {
   bool _seekInFlight = false;
 
   int _lastSeekAt = 0;
+  int _consecutiveJumpSeeks = 0;
   double _currentSlewRate = 1.0;
+  bool _isSlewing = false;
+  int _slewDirection = 0;
+  int _outOfBandTicks = 0;
   bool _readySentForCurrentVersion = false;
   bool _disposed = false;
 
   bool get isDisposed => _disposed;
   double get roomRate => _roomRate;
   bool get waitingForReady => _waitingForReady;
+  bool get isSlewing => _isSlewing;
   int get discontinuity => _discontinuity;
   int get frames => _frames;
   String get observationEpoch => _observationEpoch;
   String get epoch => _epoch;
-  String? get readinessVersion => _readinessVersion;
+  String? get readinessVersion => _readinessVersion?.toString();
+
+  /// Uncertainty-aware entry threshold (in ms) before starting a rate slew.
+  double get enterSlewThresholdMs {
+    final uncertainty = clockSync.isSynchronized ? clockSync.uncertaintyMs : 50.0;
+    return (35.0 + uncertainty).clamp(50.0, 120.0);
+  }
+
+  /// Uncertainty-aware exit threshold (in ms) to restore nominal rate 1.0x.
+  double get exitSlewThresholdMs {
+    final uncertainty = clockSync.isSynchronized ? clockSync.uncertaintyMs : 50.0;
+    return (12.0 + 0.4 * uncertainty).clamp(15.0, 35.0);
+  }
 
   void updateRoomSnapshot(Map<String, dynamic> snapshot) {
     _lastSnapshot = snapshot;
+    _snapshotServerTime = (snapshot['serverNow'] as int?) ?? clockSync.serverNow;
+
     final room = snapshot['room'] as Map<String, dynamic>? ?? snapshot;
     final epochVal = snapshot['epoch'] ?? room['epoch'];
     if (epochVal != null) {
@@ -107,6 +141,7 @@ class GuestPlaybackReconciler {
       _streamVersion = newStreamVersion;
       _readinessVersion = newReadinessVersion;
       _readySentForCurrentVersion = false;
+      _consecutiveJumpSeeks = 0;
     } else {
       _mediaVersion = newMediaVersion;
       _streamVersion = newStreamVersion;
@@ -166,6 +201,7 @@ class GuestPlaybackReconciler {
     if (_mediaVersion.isEmpty) return;
 
     if (!adapter.paused) unawaited(adapter.pause());
+    _resetSlewIfNeeded();
 
     final targetPos = targetPositionMs;
     final driftMs = adapter.positionMs - targetPos;
@@ -242,43 +278,69 @@ class GuestPlaybackReconciler {
     if (snapshot == null) return math.max(0, _pauseAt);
 
     final serverTime = clockSync.serverNow;
-    final int? serverNow = snapshot['serverNow'] as int?;
-    if (serverNow == null) {
-      final stateObj = snapshot['state'] as Map<String, dynamic>?;
-      if (stateObj != null && stateObj['position'] is num) {
-        return ((stateObj['position'] as num).toDouble() * 1000).round();
-      }
-      if (_paused) return math.max(0, _pauseAt);
-      final int startAt = snapshot['startAt'] as int? ?? _startAt;
-      if (serverTime < startAt) return 0;
-      return math.max(0, ((serverTime - startAt) * _roomRate).round());
+    final stateObj = snapshot['state'] as Map<String, dynamic>?;
+    final bool isPaused = stateObj?['paused'] as bool? ?? _paused;
+    final double duration = (stateObj?['duration'] as num?)?.toDouble() ?? 0.0;
+    final bool hasStatePos = stateObj != null && stateObj['position'] is num;
+    final double statePosition = hasStatePos ? (stateObj['position'] as num).toDouble() : (_pauseAt / 1000.0);
+
+    final int? explicitServerNow = snapshot['serverNow'] as int?;
+    final int? startAt = snapshot['startAt'] as int?;
+
+    // When paused, the room timeline is anchored at statePosition (or pauseAt).
+    if (isPaused) {
+      if (hasStatePos) return math.max(0, (statePosition * 1000).round());
+      return math.max(0, _pauseAt);
     }
 
-    final stateObj = snapshot['state'] as Map<String, dynamic>?;
-    final double statePosition = (stateObj?['position'] as num?)?.toDouble() ?? (_pauseAt / 1000.0);
-    final double duration = (stateObj?['duration'] as num?)?.toDouble() ?? 0.0;
-    final bool isPaused = stateObj?['paused'] as bool? ?? _paused;
+    // Active playback without explicit serverNow:
+    // If startAt is present and state.position was not explicitly provided, startAt is the t=0 epoch anchor.
+    if (explicitServerNow == null && !hasStatePos) {
+      final int anchorStart = startAt ?? _startAt;
+      if (serverTime < anchorStart) return 0;
+      return math.max(0, ((serverTime - anchorStart) * _roomRate).round());
+    }
 
+    // Otherwise anchor at explicit serverNow (or _snapshotServerTime when snapshot arrived).
+    final int anchorServerNow = explicitServerNow ?? _snapshotServerTime;
     var effectiveServerTime = serverTime;
     final int? pauseAt = snapshot['pauseAt'] as int?;
-    if (pauseAt != null) {
+    if (pauseAt != null && pauseAt > 0) {
       effectiveServerTime = math.min(effectiveServerTime, pauseAt);
     }
 
-    final int? startAt = snapshot['startAt'] as int?;
-    final int elapsedMs = startAt != null
-        ? math.max(0, effectiveServerTime - math.max(serverNow, startAt))
-        : (effectiveServerTime - serverNow);
+    final int elapsedMs = startAt != null && startAt > 0
+        ? math.max(0, effectiveServerTime - math.max(anchorServerNow, startAt))
+        : math.max(0, effectiveServerTime - anchorServerNow);
 
     final double targetSeconds = math.max(
       0.0,
-      math.min(
-        duration > 0 ? duration : double.infinity,
-        statePosition + (isPaused ? 0.0 : (elapsedMs * _roomRate) / 1000.0),
-      ),
+      math.min(duration > 0 ? duration : double.infinity, statePosition + (elapsedMs * _roomRate) / 1000.0),
     );
 
     return (targetSeconds * 1000).round();
+  }
+
+  void _resetSlewIfNeeded() {
+    _isSlewing = false;
+    _slewDirection = 0;
+    _outOfBandTicks = 0;
+    if (_currentSlewRate != 1.0 && adapter.canSetRate) {
+      _currentSlewRate = 1.0;
+      unawaited(adapter.setRate(_roomRate));
+    }
+  }
+
+  double _computeProportionalSlewFactor(int driftMs) {
+    final absDrift = driftMs.abs();
+    // For >= 500ms drift, use full ±4% (1.04 / 0.96) for rapid convergence and test parity.
+    if (absDrift >= 500) {
+      return driftMs < 0 ? (1.0 + _maxSlewDelta) : (1.0 - _maxSlewDelta);
+    }
+    // Proportional taper between exitSlewThresholdMs and 500ms, quantized to 0.5% steps.
+    final rawDelta = (absDrift * _kP).clamp(_minSlewDelta, _maxSlewDelta);
+    final quantizedDelta = ((rawDelta * 200.0).round() / 200.0).clamp(_minSlewDelta, _maxSlewDelta);
+    return driftMs < 0 ? (1.0 + quantizedDelta) : (1.0 - quantizedDelta);
   }
 
   void _tick() {
@@ -288,6 +350,7 @@ class GuestPlaybackReconciler {
 
     if (_waitingForReady) {
       if (!adapter.paused) unawaited(adapter.pause());
+      _resetSlewIfNeeded();
 
       final targetPos = targetPositionMs;
       final driftMs = adapter.positionMs - targetPos;
@@ -323,10 +386,12 @@ class GuestPlaybackReconciler {
     final targetPos = targetPositionMs;
     final currentPos = adapter.positionMs;
     final driftMs = currentPos - targetPos;
+    final absDrift = driftMs.abs();
 
     if (_paused) {
       if (!adapter.paused) unawaited(adapter.pause());
-      if (driftMs.abs() > 500 && now - _lastSeekAt > 1500 && !_seekInFlight) {
+      _resetSlewIfNeeded();
+      if (absDrift > 500 && now - _lastSeekAt > _baseSeekCooldownMs && !_seekInFlight) {
         _lastSeekAt = now;
         _seekInFlight = true;
         _discontinuity++;
@@ -343,37 +408,61 @@ class GuestPlaybackReconciler {
       unawaited(adapter.play());
     }
 
-    if (driftMs.abs() <= 350) {
-      if (_currentSlewRate != 1.0 && adapter.canSetRate) {
-        _currentSlewRate = 1.0;
-        unawaited(adapter.setRate(_roomRate));
+    // Large drift (> 2000ms): guarded jump seek with exponential retry backoff.
+    if (absDrift > _hardSeekThresholdMs) {
+      final seekCooldown = math.min(_maxSeekBackoffMs, _baseSeekCooldownMs * (1 << math.min(2, _consecutiveJumpSeeks)));
+      if (now - _lastSeekAt > seekCooldown && !adapter.buffering && !adapter.isHeld && !_seekInFlight) {
+        _lastSeekAt = now;
+        _seekInFlight = true;
+        _consecutiveJumpSeeks++;
+        _discontinuity++;
+        _resetSlewIfNeeded();
+        unawaited(
+          adapter.seek(targetPos).whenComplete(() {
+            _seekInFlight = false;
+          }),
+        );
       }
       return;
     }
 
-    if (driftMs.abs() <= 2000 && adapter.canSetRate) {
-      final double slewFactor = driftMs < 0 ? 1.04 : 0.96;
+    // Once inside 2000ms, any prior jump seek succeeded in entering the slew capture range.
+    _consecutiveJumpSeeks = 0;
+
+    final exitThresh = exitSlewThresholdMs;
+    final enterThresh = enterSlewThresholdMs;
+    final currentSign = driftMs == 0 ? 0 : (driftMs < 0 ? -1 : 1);
+
+    // Exit slewing when within tight exit threshold OR when we crossed zero (overshot target).
+    if (_isSlewing) {
+      final crossedZero = _slewDirection != 0 && currentSign != 0 && currentSign != _slewDirection;
+      if (absDrift <= exitThresh || crossedZero) {
+        _resetSlewIfNeeded();
+        return;
+      }
+    } else {
+      if (absDrift <= enterThresh) {
+        _outOfBandTicks = 0;
+        _resetSlewIfNeeded();
+        return;
+      }
+      // Require 2 consecutive ticks for mild drift (< 250ms) to filter transient frame jitter,
+      // or enter immediately when drift >= 250ms.
+      _outOfBandTicks++;
+      if (absDrift < 250 && _outOfBandTicks < 2) {
+        return;
+      }
+      _isSlewing = true;
+      _slewDirection = currentSign;
+    }
+
+    if (adapter.canSetRate) {
+      final double slewFactor = _computeProportionalSlewFactor(driftMs);
       final double targetSlew = _roomRate * slewFactor;
-      if ((_currentSlewRate - slewFactor).abs() > 0.005) {
+      if ((_currentSlewRate - slewFactor).abs() > 0.002) {
         _currentSlewRate = slewFactor;
         unawaited(adapter.setRate(targetSlew));
       }
-      return;
-    }
-
-    if (now - _lastSeekAt > 1500 && !adapter.buffering && !adapter.isHeld && !_seekInFlight) {
-      _lastSeekAt = now;
-      _seekInFlight = true;
-      _discontinuity++;
-      if (_currentSlewRate != 1.0 && adapter.canSetRate) {
-        _currentSlewRate = 1.0;
-        unawaited(adapter.setRate(_roomRate));
-      }
-      unawaited(
-        adapter.seek(targetPos).whenComplete(() {
-          _seekInFlight = false;
-        }),
-      );
     }
   }
 
@@ -471,7 +560,7 @@ class GuestPlaybackReconciler {
       status: status,
       score: score,
       confidence: confidence,
-      measurementFreshnessMs: 0,
+      measurementFreshnessMs: clockSync.measurementFreshnessMs(now),
     );
   }
 

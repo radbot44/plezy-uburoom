@@ -736,6 +736,7 @@ class WatchTogetherProvider extends ChangeNotifier {
           socketService: _socketService!,
           roomId: _uburoomRoomId!,
           viewerId: _viewerId,
+          listenToRoomStateStream: false,
         );
         if (_lastUburoomSnapshot != null) {
           _uburoomReconciler!.updateRoomSnapshot(_lastUburoomSnapshot!);
@@ -1237,6 +1238,7 @@ class WatchTogetherProvider extends ChangeNotifier {
         socketService: socket,
         roomId: roomId,
         viewerId: _viewerId,
+        listenToRoomStateStream: false,
       );
       _uburoomReconciler!.updateRoomSnapshot(snapshot);
       _attached = true;

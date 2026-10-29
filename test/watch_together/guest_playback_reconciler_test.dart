@@ -330,7 +330,7 @@ void main() {
           hasRenderedFrame: true,
           playing: true,
           position: const Duration(milliseconds: 120500),
-        );
+        )..audioPassthroughActive = true;
         final adapter = PlezyPlayerAdapter(
           player: player,
           copy: _testCopy(),
@@ -748,5 +748,81 @@ void main() {
       expect(item!.raw?['uburoomMediaUrl'], directPmsUrl);
       expect(item.raw?['uburoomHeaders'], isEmpty);
     });
+
+    test(
+      'hysteresis micro-PLL slews mild drift (150ms) and exits only once inside tight exit band or zero-crossing',
+      () {
+        fakeAsync((async) {
+          final clockSync = ClockSync();
+          _seedClock(clockSync); // RTT = 10ms, uncertainty = 5ms -> enter ~50ms, exit ~15ms
+
+          final socketService = _TestSocketService(clockSync: clockSync);
+          final player = _SyncPlayer(
+            hasRenderedFrame: true,
+            playing: true,
+            position: const Duration(milliseconds: 1850),
+          );
+          final rates = <double>[];
+          final adapter = PlezyPlayerAdapter(
+            player: player,
+            copy: _testCopy(),
+            commands: PlayerCommands(
+              play: () => player.play(),
+              pause: () => player.pause(),
+              seek: (pos) => player.seek(pos),
+              setRate: (rate) async {
+                rates.add(rate);
+                return player.setRate(rate);
+              },
+            ),
+          );
+
+          final reconciler = GuestPlaybackReconciler(
+            adapter: adapter,
+            clockSync: clockSync,
+            socketService: socketService,
+            roomId: 'room-1',
+            viewerId: 'viewer-1',
+            listenToRoomStateStream: false,
+          );
+
+          // Target is 2000ms, player is at 1850ms (drift = -150ms, previously ignored by the old 350ms deadband!)
+          final serverNow = clockSync.serverNow;
+          reconciler.updateRoomSnapshot({
+            'epoch': 1,
+            'revision': 1,
+            'mediaVersion': 'mv-1',
+            'streamVersion': 'sv-1',
+            'waitingForReady': false,
+            'serverNow': serverNow,
+            'startAt': serverNow - 2000,
+            'pauseAt': 0,
+            'state': {'paused': false, 'rate': 1.0, 'position': 2.0},
+          });
+
+          // Two 100ms ticks to pass persistence check for mild drift (<250ms)
+          player.seek(const Duration(milliseconds: 1950)); // keep drift at -150ms as time advances
+          async.elapse(const Duration(milliseconds: 100));
+          player.seek(const Duration(milliseconds: 2050)); // still -150ms behind 2200ms target
+          async.elapse(const Duration(milliseconds: 100));
+          async.flushMicrotasks();
+
+          expect(reconciler.isSlewing, isTrue);
+          expect(rates, isNotEmpty);
+          expect(rates.last, greaterThan(1.0));
+          expect(rates.last, lessThan(1.04)); // Proportional slew (~1.01) instead of harsh 1.04 jump
+
+          // Now player catches up to within 10ms of target (2300ms target, player at 2295ms)
+          player.seek(const Duration(milliseconds: 2295));
+          async.elapse(const Duration(milliseconds: 100));
+          async.flushMicrotasks();
+
+          expect(reconciler.isSlewing, isFalse);
+          expect(rates.last, closeTo(1.0, 0.001));
+
+          reconciler.dispose();
+        });
+      },
+    );
   });
 }

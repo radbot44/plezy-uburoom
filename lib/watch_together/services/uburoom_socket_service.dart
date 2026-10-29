@@ -66,6 +66,7 @@ class UburoomSocketService {
   WebSocketChannel? _channel;
   StreamSubscription? _subscription;
   Timer? _clockTimer;
+  final List<Timer> _burstTimers = [];
   Timer? _reconnectTimer;
   int _reconnectAttempts = 0;
   bool _explicitlyClosed = false;
@@ -145,9 +146,17 @@ class UburoomSocketService {
 
   void _startClockLoop() {
     _clockTimer?.cancel();
-    _clockTimer = Timer.periodic(const Duration(milliseconds: 1000), (_) => _sendClockPing());
-    // Initial immediate ping
+    for (final t in _burstTimers) {
+      t.cancel();
+    }
+    _burstTimers.clear();
+
+    // Initial burst of clock exchanges so ClockSync converges (<150ms) before playback starts.
     _sendClockPing();
+    for (final delayMs in const [120, 300, 600]) {
+      _burstTimers.add(Timer(Duration(milliseconds: delayMs), _sendClockPing));
+    }
+    _clockTimer = Timer.periodic(const Duration(milliseconds: 1000), (_) => _sendClockPing());
   }
 
   void _sendClockPing() {
@@ -323,6 +332,10 @@ class UburoomSocketService {
   void _cleanupChannel() {
     _clockTimer?.cancel();
     _clockTimer = null;
+    for (final t in _burstTimers) {
+      t.cancel();
+    }
+    _burstTimers.clear();
     _clockSentAt.clear();
 
     for (final completer in _inflight.values) {
