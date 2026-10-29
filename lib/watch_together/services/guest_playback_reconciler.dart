@@ -30,7 +30,14 @@ class GuestPlaybackReconciler {
     _completedSub = adapter.player.streams.completed.listen((c) => _onPlayerStateEvent(c ? 'ended' : 'playing'));
   }
 
-  static final _uuidPattern = RegExp(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$');
+  static final _uuidPattern = RegExp(
+    r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$',
+    caseSensitive: false,
+  );
+  static final _roomIdPattern = RegExp(
+    r'^([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|[a-f0-9]{8})$',
+    caseSensitive: false,
+  );
 
   /// Proportional gain for micro-PLL rate adjustment (5% per 1000ms of drift,
   /// reaching ±4.0% at 800ms drift).
@@ -38,6 +45,8 @@ class GuestPlaybackReconciler {
   static const double _minSlewDelta = 0.005;
   static const double _maxSlewDelta = 0.04;
   static const int _hardSeekThresholdMs = 2000;
+  static const int _passthroughSeekThresholdMs = 750;
+  static const int _passthroughSeekCooldownMs = 3000;
   static const int _baseSeekCooldownMs = 1500;
   static const int _maxSeekBackoffMs = 6000;
 
@@ -426,6 +435,34 @@ class GuestPlaybackReconciler {
       return;
     }
 
+    // When audio passthrough locks the sample clock (!adapter.canSetRate),
+    // micro-PLL slewing is unavailable. Use a tighter guarded seek fallback
+    // (750ms after 2 consecutive ticks) so viewers don't sit out of sync up to 2000ms.
+    if (!adapter.canSetRate) {
+      _consecutiveJumpSeeks = 0;
+      if (absDrift > _passthroughSeekThresholdMs) {
+        _outOfBandTicks++;
+        if (_outOfBandTicks >= 2 &&
+            now - _lastSeekAt > _passthroughSeekCooldownMs &&
+            !adapter.buffering &&
+            !adapter.isHeld &&
+            !_seekInFlight) {
+          _lastSeekAt = now;
+          _seekInFlight = true;
+          _outOfBandTicks = 0;
+          _discontinuity++;
+          unawaited(
+            adapter.seek(targetPos).whenComplete(() {
+              _seekInFlight = false;
+            }),
+          );
+        }
+      } else {
+        _outOfBandTicks = 0;
+      }
+      return;
+    }
+
     // Once inside 2000ms, any prior jump seek succeeded in entering the slew capture range.
     _consecutiveJumpSeeks = 0;
 
@@ -523,10 +560,10 @@ class GuestPlaybackReconciler {
 
   void _dispatchSyncQuality() {
     if (_disposed || !socketService.isConnected) return;
-    if (!_uuidPattern.hasMatch(roomId) ||
+    if (!_roomIdPattern.hasMatch(roomId) ||
         !_uuidPattern.hasMatch(viewerId) ||
-        !_uuidPattern.hasMatch(_mediaVersion) ||
-        !_uuidPattern.hasMatch(_streamVersion)) {
+        _mediaVersion.isEmpty ||
+        _streamVersion.isEmpty) {
       return;
     }
 

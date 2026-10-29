@@ -50,6 +50,7 @@ class _TestSocketService extends UburoomSocketService {
   _TestSocketService({required super.clockSync}) : super(channelFactory: (uri, origin) async => _FakeChannel());
 
   final requests = <Map<String, dynamic>>[];
+  final syncQualities = <Map<String, dynamic>>[];
   // ignore: close_sinks
   final stateController = StreamController<UburoomRoomStatePush>.broadcast();
   UburoomResponse Function(String path, Map<String, dynamic>? data)? onSendRequest;
@@ -67,6 +68,32 @@ class _TestSocketService extends UburoomSocketService {
       return onSendRequest!(path, data);
     }
     return const UburoomResponse(id: 1, status: 200, value: {'ok': true});
+  }
+
+  @override
+  void sendSyncQuality({
+    required String roomId,
+    required String viewerId,
+    required String mediaVersion,
+    required String streamVersion,
+    required String status,
+    double? score,
+    String? confidence,
+    num? measurementFreshnessMs,
+    String? reason,
+  }) {
+    final map = <String, dynamic>{
+      'roomId': roomId,
+      'viewerId': viewerId,
+      'mediaVersion': mediaVersion,
+      'streamVersion': streamVersion,
+      'status': status,
+    };
+    if (score != null) map['score'] = score;
+    if (confidence != null) map['confidence'] = confidence;
+    if (measurementFreshnessMs != null) map['measurementFreshnessMs'] = measurementFreshnessMs;
+    if (reason != null) map['reason'] = reason;
+    syncQualities.add(map);
   }
 }
 
@@ -330,7 +357,7 @@ void main() {
           hasRenderedFrame: true,
           playing: true,
           position: const Duration(milliseconds: 120500),
-        )..audioPassthroughActive = true;
+        );
         final adapter = PlezyPlayerAdapter(
           player: player,
           copy: _testCopy(),
@@ -359,6 +386,7 @@ void main() {
           'observationEpoch': 'oe-99',
           'waitingForReady': false,
           'startAt': serverNow - 120500,
+          'pauseAt': serverNow,
           'state': {'paused': false, 'rate': 1.0, 'position': 120.5, 'duration': 7200.0},
         });
 
@@ -631,6 +659,119 @@ void main() {
         final body = observeRequests.last['body'] as Map<String, dynamic>;
         // Observation rate must report actual playback rate (1.56), NOT double-multiplied (2.34)
         expect(body['rate'] as double, closeTo(1.56, 0.001));
+
+        reconciler.dispose();
+      });
+    });
+    test('falls back to guarded seek above 750ms drift when audioPassthroughActive disables rate slewing', () {
+      fakeAsync((async) {
+        final clockSync = ClockSync();
+        _seedClock(clockSync);
+
+        final socketService = _TestSocketService(clockSync: clockSync);
+        final player = _SyncPlayer(hasRenderedFrame: true, playing: true, position: const Duration(milliseconds: 1000))
+          ..audioPassthroughActive = true;
+
+        final seeks = <Duration>[];
+        final rates = <double>[];
+        final adapter = PlezyPlayerAdapter(
+          player: player,
+          copy: _testCopy(),
+          commands: PlayerCommands(
+            play: () => player.play(),
+            pause: () => player.pause(),
+            seek: (pos) async {
+              seeks.add(pos);
+              return player.seek(pos);
+            },
+            setRate: (rate) async {
+              rates.add(rate);
+              return player.setRate(rate);
+            },
+          ),
+        );
+
+        final reconciler = GuestPlaybackReconciler(
+          adapter: adapter,
+          clockSync: clockSync,
+          socketService: socketService,
+          roomId: 'abcdef12',
+          viewerId: '3886f4cb-20d4-4a49-a29d-4766e4a2a6d8',
+          listenToRoomStateStream: false,
+        );
+
+        // Target is 2000ms, player is at 1000ms (1000ms drift > 750ms passthrough threshold, < 2000ms hard threshold)
+        final serverNow = clockSync.serverNow;
+        reconciler.updateRoomSnapshot({
+          'epoch': 'epoch-1',
+          'revision': 1,
+          'mediaVersion': 'mv-1',
+          'streamVersion': 'sv-1',
+          'waitingForReady': false,
+          'serverNow': serverNow,
+          'startAt': serverNow - 2000,
+          'pauseAt': 0,
+          'state': {'paused': false, 'rate': 1.0, 'position': 2.0},
+        });
+
+        // Two 100ms ticks to satisfy persistence check
+        async.elapse(const Duration(milliseconds: 220));
+        async.flushMicrotasks();
+
+        expect(rates, isEmpty, reason: 'cannot slew rate during audio passthrough');
+        expect(seeks, hasLength(1));
+        expect(seeks.first.inMilliseconds, closeTo(2200, 50));
+
+        reconciler.dispose();
+      });
+    });
+
+    test('emits sync-quality telemetry for 8-hex room IDs', () {
+      fakeAsync((async) {
+        final clockSync = ClockSync();
+        _seedClock(clockSync);
+
+        final socketService = _TestSocketService(clockSync: clockSync);
+        final player = _SyncPlayer(hasRenderedFrame: true, playing: true, position: const Duration(milliseconds: 2000));
+        final adapter = PlezyPlayerAdapter(
+          player: player,
+          copy: _testCopy(),
+          commands: PlayerCommands(
+            play: () => player.play(),
+            pause: () => player.pause(),
+            seek: (pos) => player.seek(pos),
+            setRate: (rate) => player.setRate(rate),
+          ),
+        );
+
+        final reconciler = GuestPlaybackReconciler(
+          adapter: adapter,
+          clockSync: clockSync,
+          socketService: socketService,
+          roomId: 'abcdef12',
+          viewerId: '3886f4cb-20d4-4a49-a29d-4766e4a2a6d8',
+          listenToRoomStateStream: false,
+        );
+
+        final serverNow = clockSync.serverNow;
+        reconciler.updateRoomSnapshot({
+          'epoch': 'epoch-1',
+          'revision': 1,
+          'mediaVersion': 'mv-1',
+          'streamVersion': 'sv-1',
+          'waitingForReady': false,
+          'serverNow': serverNow,
+          'startAt': serverNow - 2000,
+          'pauseAt': 0,
+          'state': {'paused': false, 'rate': 1.0, 'position': 2.0},
+        });
+
+        async.elapse(const Duration(milliseconds: 1000));
+        async.flushMicrotasks();
+
+        expect(socketService.syncQualities, hasLength(1));
+        expect(socketService.syncQualities.first['roomId'], 'abcdef12');
+        expect(socketService.syncQualities.first['confidence'], 'confident');
 
         reconciler.dispose();
       });
