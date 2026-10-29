@@ -864,7 +864,8 @@
     "rotationLockButton": "Rotation lock",
     "lockScreen": "Lock screen",
     "screenLockButton": "Screen lock",
-    "longPressToUnlock": "Long press to unlock",
+    "tapToUnlock": "Tap to unlock",
+    "tapAgainToUnlock": "Tap again to unlock",
     "timelineSlider": "Video timeline",
     "volumeSlider": "Volume level",
     "endsAt": "Ends at ${time}",
@@ -1278,12 +1279,14 @@
     "filtersWithCount": "Filters (${count})",
     "noRecommendations": "No recommendations available",
     "noCollections": "No collections in this library",
+    "noGenres": "No genres in this library",
     "noFoldersFound": "No folders found",
     "folders": "folders",
     "tabs": {
       "recommended": "Recommended",
       "browse": "Browse",
       "collections": "Collections",
+      "genres": "Genres",
       "playlists": "Playlists"
     },
     "groupings": {

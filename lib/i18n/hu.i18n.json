@@ -864,7 +864,8 @@
     "rotationLockButton": "Elforgatás zárolása",
     "lockScreen": "Képernyő zárolása",
     "screenLockButton": "Képernyőzár",
-    "longPressToUnlock": "Nyomd hosszan a feloldáshoz",
+    "tapToUnlock": "",
+    "tapAgainToUnlock": "",
     "timelineSlider": "Videó idősáv",
     "volumeSlider": "Hangerő",
     "endsAt": "Vége: ${time}",
@@ -1278,12 +1279,14 @@
     "filtersWithCount": "Szűrők (${count})",
     "noRecommendations": "Nincsenek elérhető ajánlások",
     "noCollections": "Nincsenek gyűjtemények ebben a könyvtárban",
+    "noGenres": "",
     "noFoldersFound": "Nem találhatók mappák",
     "folders": "mappák",
     "tabs": {
       "recommended": "Ajánlott",
       "browse": "Böngészés",
       "collections": "Gyűjtemények",
+      "genres": "",
       "playlists": "Lejátszási listák"
     },
     "groupings": {

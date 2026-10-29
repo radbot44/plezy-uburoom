@@ -864,7 +864,8 @@
     "rotationLockButton": "Blocco rotazione",
     "lockScreen": "Blocca schermo",
     "screenLockButton": "Blocco schermo",
-    "longPressToUnlock": "Premi a lungo per sbloccare",
+    "tapToUnlock": "",
+    "tapAgainToUnlock": "",
     "timelineSlider": "Timeline video",
     "volumeSlider": "Livello volume",
     "endsAt": "Termina alle ${time}",
@@ -1278,12 +1279,14 @@
     "filtersWithCount": "Filtri (${count})",
     "noRecommendations": "Nessun consiglio disponibile",
     "noCollections": "Nessuna raccolta in questa libreria",
+    "noGenres": "",
     "noFoldersFound": "Nessuna cartella trovata",
     "folders": "cartelle",
     "tabs": {
       "recommended": "Consigliati",
       "browse": "Esplora",
       "collections": "Raccolte",
+      "genres": "",
       "playlists": "Playlist"
     },
     "groupings": {
