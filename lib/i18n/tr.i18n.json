@@ -864,7 +864,8 @@
     "rotationLockButton": "Döndürme kilidi",
     "lockScreen": "Ekranı kilitle",
     "screenLockButton": "Ekran kilidi",
-    "longPressToUnlock": "Kilidi açmak için uzun basın",
+    "tapToUnlock": "",
+    "tapAgainToUnlock": "",
     "timelineSlider": "Video zaman çubuğu",
     "volumeSlider": "Ses seviyesi",
     "endsAt": "Bitiş saati: ${time}",
@@ -1278,12 +1279,14 @@
     "filtersWithCount": "Filtreler (${count})",
     "noRecommendations": "Öneri bulunmuyor",
     "noCollections": "Bu kitaplıkta koleksiyon yok",
+    "noGenres": "",
     "noFoldersFound": "Klasör bulunamadı",
     "folders": "klasörler",
     "tabs": {
       "recommended": "Önerilenler",
       "browse": "Göz At",
       "collections": "Koleksiyonlar",
+      "genres": "",
       "playlists": "Oynatma Listeleri"
     },
     "groupings": {
