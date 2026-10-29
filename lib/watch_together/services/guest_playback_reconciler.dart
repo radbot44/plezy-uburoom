@@ -272,7 +272,10 @@ class GuestPlaybackReconciler {
 
     final double targetSeconds = math.max(
       0.0,
-      math.min(duration > 0 ? duration : double.infinity, statePosition + (isPaused ? 0.0 : elapsedMs / 1000.0)),
+      math.min(
+        duration > 0 ? duration : double.infinity,
+        statePosition + (isPaused ? 0.0 : (elapsedMs * _roomRate) / 1000.0),
+      ),
     );
 
     return (targetSeconds * 1000).round();
@@ -349,9 +352,10 @@ class GuestPlaybackReconciler {
     }
 
     if (driftMs.abs() <= 2000 && adapter.canSetRate) {
-      final double targetSlew = driftMs < 0 ? (_roomRate * 1.04) : (_roomRate * 0.96);
-      if ((_currentSlewRate - targetSlew).abs() > 0.005) {
-        _currentSlewRate = targetSlew;
+      final double slewFactor = driftMs < 0 ? 1.04 : 0.96;
+      final double targetSlew = _roomRate * slewFactor;
+      if ((_currentSlewRate - slewFactor).abs() > 0.005) {
+        _currentSlewRate = slewFactor;
         unawaited(adapter.setRate(targetSlew));
       }
       return;
@@ -384,14 +388,14 @@ class GuestPlaybackReconciler {
     final elapsedMs = _lastSampleAt > 0 ? (sampleAt - _lastSampleAt) : 1000.0;
     _lastSampleAt = sampleAt;
 
-    if (state == 'playing') {
-      final deltaFrames = math.max(1, ((elapsedMs / 1000.0) * 24.0).round());
+    if (state == 'playing' && !adapter.buffering && !adapter.paused) {
+      final deltaFrames = math.max(1, ((elapsedMs / 1000.0) * 24.0 * _roomRate).round());
       _frames += deltaFrames;
     }
 
     final observedAt = clockSync.serverNow;
     final double positionSeconds = adapter.positionMs / 1000.0;
-    final double rate = adapter.canSetRate ? _currentSlewRate * _roomRate : 1.0;
+    final double rate = adapter.canSetRate ? (_currentSlewRate * _roomRate) : 1.0;
     final sequence = ++_observationSequence;
 
     final data = <String, dynamic>{

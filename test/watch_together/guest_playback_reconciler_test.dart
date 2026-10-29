@@ -558,6 +558,83 @@ void main() {
         reconciler.dispose();
       });
     });
+
+    test('scales elapsed time and slew rate correctly for non-1.0 room rate', () {
+      fakeAsync((async) {
+        final clockSync = ClockSync();
+        _seedClock(clockSync);
+
+        final socketService = _TestSocketService(clockSync: clockSync);
+        double? lastSetRate;
+        final player = _SyncPlayer(
+          hasRenderedFrame: true,
+          playing: true,
+          position: const Duration(milliseconds: 10000),
+        );
+        final adapter = PlezyPlayerAdapter(
+          player: player,
+          copy: _testCopy(),
+          commands: PlayerCommands(
+            play: () => player.play(),
+            pause: () => player.pause(),
+            seek: (pos) => player.seek(pos),
+            setRate: (rate) async {
+              lastSetRate = rate;
+              await player.setRate(rate);
+            },
+          ),
+        );
+
+        final reconciler = GuestPlaybackReconciler(
+          adapter: adapter,
+          clockSync: clockSync,
+          socketService: socketService,
+          roomId: 'room-1',
+          viewerId: 'viewer-1',
+        );
+
+        final serverNow = clockSync.serverNow;
+        // Room rate is 1.5. Snapshot taken 10s ago at (serverNow - 10000) with position 10.0s.
+        reconciler.updateRoomSnapshot({
+          'epoch': 'epoch-1.5',
+          'revision': 1,
+          'mediaVersion': 'mv-1',
+          'streamVersion': 'sv-1',
+          'observationEpoch': 'oe-1.5',
+          'waitingForReady': false,
+          'serverNow': serverNow - 10000,
+          'startAt': serverNow - 10000,
+          'state': {'paused': false, 'rate': 1.5, 'position': 10.0, 'duration': 7200.0},
+        });
+
+        // At 1.5x rate, 10s of elapsed server time should advance timeline by 15s (from 10s to 25s = 25000ms)
+        expect(reconciler.targetPositionMs, 25000);
+
+        // Player is at 10000ms, set player to 24500ms (drift = 24500 - 25000 = -500ms).
+        player.seek(const Duration(milliseconds: 24500));
+        // Run reconciler tick (250ms cadence)
+        async.elapse(const Duration(milliseconds: 260));
+        async.flushMicrotasks();
+
+        // Drift is -500ms (behind target by 500ms, within 350-2000ms slew window).
+        // Slew factor should be 1.04. Target slew = 1.5 * 1.04 = 1.56.
+        expect(lastSetRate, closeTo(1.56, 0.001));
+
+        // Wait for 1s periodic observation tick
+        async.elapse(const Duration(milliseconds: 1000));
+        async.flushMicrotasks();
+
+        final observeRequests = socketService.requests
+            .where((r) => (r['path'] as String).endsWith('/observe'))
+            .toList();
+        expect(observeRequests, isNotEmpty);
+        final body = observeRequests.last['body'] as Map<String, dynamic>;
+        // Observation rate must report actual playback rate (1.56), NOT double-multiplied (2.34)
+        expect(body['rate'] as double, closeTo(1.56, 0.001));
+
+        reconciler.dispose();
+      });
+    });
   });
 
   group('WatchTogetherProvider Uburoom integration', () {

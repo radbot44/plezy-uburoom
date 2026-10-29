@@ -1066,7 +1066,7 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen>
   /// Whether a downloaded copy may stand in for a capped
   /// [_selectedQualityPreset] (issue #2466). Only the saved startup default
   /// yields; a picked quality is honored.
-  bool get _downloadOutranksQuality => !_qualityPresetExplicit || (_watchTogetherRoom()?.isInSession ?? false);
+  bool get _downloadOutranksQuality => !_qualityPresetExplicit;
 
   /// Atomically publish a freshly opened [PlaybackSession] and refine the
   /// selection-intent fields from what the backend actually delivered

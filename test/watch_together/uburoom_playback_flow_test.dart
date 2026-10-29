@@ -25,18 +25,30 @@ class _TestSocket extends UburoomSocketService {
 
   final requests = <Map<String, dynamic>>[];
   final stateController = StreamController<UburoomRoomStatePush>.broadcast();
+  final connectionController = StreamController<UburoomConnectionState>.broadcast();
+  UburoomConnectionState _currentState = UburoomConnectionState.connected;
+  UburoomResponse Function(String path, Map<String, dynamic>? data)? onSendRequest;
 
   @override
   void dispose() {
     stateController.close();
+    connectionController.close();
     super.dispose();
   }
 
   @override
-  bool get isConnected => true;
+  bool get isConnected => _currentState == UburoomConnectionState.connected;
 
   @override
-  UburoomConnectionState get state => UburoomConnectionState.connected;
+  UburoomConnectionState get state => _currentState;
+
+  void emitConnectionState(UburoomConnectionState newState) {
+    _currentState = newState;
+    connectionController.add(newState);
+  }
+
+  @override
+  Stream<UburoomConnectionState> get connectionStateStream => connectionController.stream;
 
   @override
   String get serverUrl => 'http://localhost:6767';
@@ -50,6 +62,9 @@ class _TestSocket extends UburoomSocketService {
   @override
   Future<UburoomResponse> sendRequest(String path, [Map<String, dynamic>? data]) async {
     requests.add({'path': path, 'data': data});
+    if (onSendRequest != null) {
+      return onSendRequest!(path, data);
+    }
     return const UburoomResponse(id: 1, status: 200, value: {'ok': true});
   }
 }
@@ -463,5 +478,171 @@ void main() {
     expect(readyReq['data']?['mediaVersion'], 'mv-1');
     expect(readyReq['data']?['readinessVersion'], 'seek-uuid-1234');
     expect(readyReq['data']?['ready'], isTrue);
+  });
+
+  test('socket reconnect restores active room subscription and updates snapshot', () async {
+    provider.handleUburoomSnapshotForTest({
+      'id': 'room-uuid-1',
+      'epoch': 'ep-init',
+      'mediaId': 'm-1',
+      'title': 'Initial Title',
+      'state': {'position': 0, 'duration': 100, 'paused': true},
+    });
+
+    socket.onSendRequest = (path, data) {
+      if (path.contains('/api/watch/rooms/room-uuid-1?')) {
+        return const UburoomResponse(
+          id: 11,
+          status: 200,
+          value: {
+            'id': 'room-uuid-1',
+            'epoch': 'ep-reconnected',
+            'mediaId': 'm-2',
+            'title': 'Updated Title After Reconnect',
+            'state': {'position': 45, 'duration': 100, 'paused': false},
+          },
+        );
+      }
+      return const UburoomResponse(id: 1, status: 200, value: {'ok': true});
+    };
+
+    // Emit reconnect
+    socket.emitConnectionState(UburoomConnectionState.connected);
+    await pumpEventQueue();
+
+    expect(provider.debugUburoomEpoch, 'ep-reconnected');
+    expect(provider.uburoomState?.title, 'Updated Title After Reconnect');
+    final subReq = socket.requests.lastWhere((r) => (r['path'] as String).contains('/api/watch/rooms/room-uuid-1?'));
+    expect(subReq['path'], contains('quality=direct'));
+    expect(subReq['path'], contains('delivery=auto'));
+  });
+
+  test('play and pause from lobby send room commands when player is not open', () async {
+    provider.handleUburoomSnapshotForTest({
+      'id': 'room-uuid-1',
+      'mediaId': '100',
+      'isHost': true,
+      'canPlayback': true,
+      'epoch': 'ep-1',
+      'state': {'position': 10, 'duration': 100, 'paused': true},
+    });
+
+    expect(provider.isFollowing, isFalse);
+    expect(provider.canControl, isTrue);
+
+    final playResult = provider.play();
+    expect(playResult, isTrue);
+
+    final playReq = socket.requests.lastWhere((r) => r['path'] == '/api/watch/rooms/room-uuid-1/command');
+    expect(playReq['data']?['command']?['action'], 'media.play');
+
+    final pauseResult = provider.pause();
+    expect(pauseResult, isTrue);
+
+    final pauseReq = socket.requests.lastWhere((r) => r['path'] == '/api/watch/rooms/room-uuid-1/command');
+    expect(pauseReq['data']?['command']?['action'], 'media.pause');
+  });
+
+  test('play and pause from lobby refuse when user cannot control playback', () async {
+    provider.handleUburoomSnapshotForTest({
+      'id': 'room-uuid-1',
+      'mediaId': '100',
+      'isHost': false,
+      'canPlayback': false,
+      'epoch': 'ep-1',
+      'state': {'position': 10, 'duration': 100, 'paused': true},
+    });
+
+    expect(provider.canControl, isFalse);
+    expect(provider.play(), isFalse);
+    expect(provider.pause(), isFalse);
+  });
+
+  test('loadMediaInUburoom and addMediaToUburoomQueue provide fallback duration when durationMs is null', () async {
+    final item = testMediaItem(id: '999', title: 'Stream With Unknown Duration', durationMs: null);
+
+    // 1. loadMediaInUburoom in durable room uses queue playNow with duration 1.0
+    provider.handleUburoomSnapshotForTest({
+      'id': 'room-uuid-1',
+      'durable': true,
+      'epoch': 'ep-dur',
+      'state': {'position': 0, 'duration': 100, 'paused': true},
+    });
+    await provider.loadMediaInUburoom(item);
+    final playNowReq = socket.requests.lastWhere((r) => r['path'] == '/api/watch/rooms/room-uuid-1/queue');
+    expect(playNowReq['data']?['item']?['duration'], 1.0);
+
+    // 2. addMediaToUburoomQueue uses duration 1.0
+    await provider.addMediaToUburoomQueue(item);
+    final addReq = socket.requests.lastWhere((r) => r['path'] == '/api/watch/rooms/room-uuid-1/queue');
+    expect(addReq['data']?['item']?['duration'], 1.0);
+  });
+
+  test('handleUburoomSnapshot switches delivery back to auto when item is not downloaded', () async {
+    provider.debugUburoomDelivery = 'local';
+
+    socket.onSendRequest = (path, data) {
+      if (path.contains('delivery=auto')) {
+        return const UburoomResponse(
+          id: 10,
+          status: 200,
+          value: {
+            'id': 'room-uuid-1',
+            'epoch': 'ep-auto-1',
+            'mediaId': 'stream-only-item',
+            'title': 'Online Stream',
+            'mediaUrl': '/api/watch/media/grant-auto/start',
+            'state': {'position': 0, 'duration': 100, 'paused': true},
+          },
+        );
+      }
+      return const UburoomResponse(id: 1, status: 200, value: {'ok': true});
+    };
+
+    provider.handleUburoomSnapshotForTest({
+      'id': 'room-uuid-1',
+      'epoch': 'ep-auto-0',
+      'mediaId': 'stream-only-item',
+      'title': 'Online Stream',
+      'mediaUrl': '/api/watch/media/grant-auto/start',
+      'state': {'position': 0, 'duration': 100, 'paused': true},
+    });
+    await pumpEventQueue();
+
+    expect(provider.debugUburoomDelivery, 'auto');
+    final switchReq = socket.requests.firstWhere((r) => (r['path'] as String).contains('delivery=auto'));
+    expect(switchReq['path'], contains('quality=direct'));
+    expect(switchReq['path'], contains('delivery=auto'));
+  });
+
+  test('stopMedia in uburoom durable room clears queue and does not send unsupported media.stop', () async {
+    provider.handleUburoomSnapshotForTest({
+      'id': 'room-uuid-1',
+      'durable': true,
+      'epoch': 'ep-durable',
+      'state': {'position': 10, 'duration': 100, 'paused': false},
+    });
+
+    provider.stopMedia();
+    await pumpEventQueue();
+
+    final clearReq = socket.requests.lastWhere((r) => r['path'] == '/api/watch/rooms/room-uuid-1/command');
+    expect(clearReq['data']?['command']?['action'], 'queue.clear');
+    final hasMediaStop = socket.requests.any((r) => r['data']?['command']?['action'] == 'media.stop');
+    expect(hasMediaStop, isFalse);
+  });
+
+  test('setRate in uburoom session does not send unsupported media.rate command', () async {
+    provider.handleUburoomSnapshotForTest({
+      'id': 'room-uuid-1',
+      'epoch': 'ep-1',
+      'state': {'position': 10, 'duration': 100, 'paused': false},
+    });
+
+    provider.setRate(1.5);
+    await pumpEventQueue();
+
+    final hasMediaRate = socket.requests.any((r) => r['data']?['command']?['action'] == 'media.rate');
+    expect(hasMediaRate, isFalse);
   });
 }
