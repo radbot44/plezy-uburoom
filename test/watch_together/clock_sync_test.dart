@@ -132,5 +132,88 @@ void main() {
       expect(sync.toLocalTime(6000), equals(5000));
       expect(sync.measurementFreshnessMs(2350), equals(350));
     });
+
+    test('exposes sampleCount and minRttMs diagnostic getters', () {
+      int mono = 1000;
+      final sync = ClockSync(monotonicNowMs: () => mono);
+      expect(sync.sampleCount, equals(0));
+      expect(sync.minRttMs, isNull);
+
+      sync.addSample(
+        localSendAt: 1000,
+        serverReceivedAt: 2000,
+        serverSentAt: 2005,
+        serverProcessingMs: 5.0,
+        localReceiveAt: 1090, // total 90ms - 5ms = 85ms RTT
+        clockEpoch: 'epoch-1',
+      );
+      expect(sync.sampleCount, equals(1));
+      expect(sync.minRttMs, closeTo(85.0, 0.01));
+
+      mono = 2045;
+      sync.addSample(
+        localSendAt: 2000,
+        serverReceivedAt: 3000,
+        serverSentAt: 3005,
+        serverProcessingMs: 5.0,
+        localReceiveAt: 2045, // total 45ms - 5ms = 40ms RTT
+        clockEpoch: 'epoch-1',
+      );
+      expect(sync.sampleCount, equals(2));
+      expect(sync.minRttMs, closeTo(40.0, 0.01));
+
+      mono = 3065;
+      sync.addSample(
+        localSendAt: 3000,
+        serverReceivedAt: 4000,
+        serverSentAt: 4005,
+        serverProcessingMs: 5.0,
+        localReceiveAt: 3065, // total 65ms - 5ms = 60ms RTT
+        clockEpoch: 'epoch-1',
+      );
+      expect(sync.sampleCount, equals(3));
+      expect(sync.minRttMs, closeTo(40.0, 0.01));
+    });
+
+    test('recovers immediately from >5000ms wall-clock step by clearing stale samples', () {
+      int mono = 1000;
+      final sync = ClockSync(monotonicNowMs: () => mono);
+      sync.addSample(
+        localSendAt: 1000,
+        serverReceivedAt: 2000,
+        serverSentAt: 2000,
+        serverProcessingMs: 0.0,
+        localReceiveAt: 1000,
+        clockEpoch: 'epoch-1',
+      );
+      mono = 2000;
+      sync.addSample(
+        localSendAt: 2000,
+        serverReceivedAt: 3000,
+        serverSentAt: 3000,
+        serverProcessingMs: 0.0,
+        localReceiveAt: 2000,
+        clockEpoch: 'epoch-1',
+      );
+      expect(sync.isSynchronized, isTrue);
+      expect(sync.sampleCount, equals(2));
+      expect(sync.currentOffsetMs, closeTo(1000.0, 0.01));
+
+      // Wall-clock step occurs: offset jumps from 1000ms to 8000ms (diff = 7000ms > 5000ms threshold)
+      mono = 3000;
+      sync.addSample(
+        localSendAt: 3000,
+        serverReceivedAt: 11000,
+        serverSentAt: 11000,
+        serverProcessingMs: 0.0,
+        localReceiveAt: 3000,
+        clockEpoch: 'epoch-1',
+      );
+
+      // Stale samples cleared immediately; snaps to new offset
+      expect(sync.sampleCount, equals(1));
+      expect(sync.isSynchronized, isFalse);
+      expect(sync.currentOffsetMs, closeTo(8000.0, 0.01));
+    });
   });
 }

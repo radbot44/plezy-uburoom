@@ -104,5 +104,82 @@ void main() {
       expect(authService.serverUrl, 'http://localhost:6767');
       expect(await authService.getToken(), 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789');
     });
+
+    test('pollHandoff aborts early and returns null when isCancelled is true before delay', () async {
+      var requestSent = false;
+      final mockClient = MockClient((request) async {
+        requestSent = true;
+        return http.Response('OK', 200);
+      });
+
+      final authService = UburoomAuthService(settingsService: settingsService, httpClient: mockClient);
+      const session = NativeHandoffSession(
+        serverUrl: 'http://localhost:6767',
+        handoffId: 'hid-123',
+        code: 'ABCD-1234',
+        proof: 'proof-123',
+        verificationUrl: 'http://localhost:6767/native-handoff.html?handoffId=hid-123',
+      );
+
+      final token = await authService.pollHandoff(
+        session,
+        interval: const Duration(milliseconds: 1),
+        isCancelled: () => true,
+      );
+
+      expect(token, isNull);
+      expect(requestSent, isFalse);
+    });
+
+    test('pollHandoff aborts early and returns null when isCancelled becomes true during polling', () async {
+      var pollCount = 0;
+      var cancelled = false;
+      final mockClient = MockClient((request) async {
+        pollCount++;
+        cancelled = true;
+        return http.Response(jsonEncode({'pending': true}), 202, headers: {'content-type': 'application/json'});
+      });
+
+      final authService = UburoomAuthService(settingsService: settingsService, httpClient: mockClient);
+      const session = NativeHandoffSession(
+        serverUrl: 'http://localhost:6767',
+        handoffId: 'hid-123',
+        code: 'ABCD-1234',
+        proof: 'proof-123',
+        verificationUrl: 'http://localhost:6767/native-handoff.html?handoffId=hid-123',
+      );
+
+      final token = await authService.pollHandoff(
+        session,
+        interval: const Duration(milliseconds: 1),
+        isCancelled: () => cancelled,
+      );
+
+      expect(token, isNull);
+      expect(pollCount, 1);
+    });
+
+    test('normalizeServerUrl extracts scheme, host, port and strips path, query, fragment', () {
+      expect(UburoomAuthService.normalizeServerUrl('http://192.168.1.50:6767/'), 'http://192.168.1.50:6767');
+      expect(
+        UburoomAuthService.normalizeServerUrl('https://watch.example.com/rooms/123?foo=bar#frag'),
+        'https://watch.example.com',
+      );
+      expect(UburoomAuthService.normalizeServerUrl('watch.example.com:8080/path'), 'https://watch.example.com:8080');
+      expect(UburoomAuthService.normalizeServerUrl('http://[::1]:6767/api/watch'), 'http://[::1]:6767');
+      expect(
+        UburoomAuthService.normalizeServerUrl('  HTTPS://WATCH.EXAMPLE.COM:8443/  '),
+        'https://watch.example.com:8443',
+      );
+    });
+
+    test('normalizeServerUrl throws FormatException if host is empty or invalid', () {
+      expect(() => UburoomAuthService.normalizeServerUrl(''), throwsFormatException);
+      expect(() => UburoomAuthService.normalizeServerUrl('   '), throwsFormatException);
+      expect(() => UburoomAuthService.normalizeServerUrl('https://'), throwsFormatException);
+      expect(() => UburoomAuthService.normalizeServerUrl('http://'), throwsFormatException);
+      expect(() => UburoomAuthService.normalizeServerUrl('https:///path'), throwsFormatException);
+      expect(() => UburoomAuthService.normalizeServerUrl('ftp://example.com'), throwsFormatException);
+    });
   });
 }

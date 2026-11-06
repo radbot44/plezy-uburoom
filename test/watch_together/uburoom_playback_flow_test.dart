@@ -1,7 +1,13 @@
 import 'dart:async';
 
+import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:plezy/database/app_database.dart';
 import 'package:plezy/mpv/mpv.dart';
+import 'package:plezy/services/multi_server_manager.dart';
+import 'package:plezy/services/playback_context.dart';
+import 'package:plezy/services/playback_initialization_types.dart';
+import 'package:plezy/services/playback_source_resolver.dart';
 import 'package:plezy/watch_together/models/watch_copy.dart';
 import 'package:plezy/watch_together/providers/watch_together_provider.dart';
 import 'package:plezy/watch_together/services/clock_sync.dart';
@@ -645,4 +651,163 @@ void main() {
     final hasMediaRate = socket.requests.any((r) => r['data']?['command']?['action'] == 'media.rate');
     expect(hasMediaRate, isFalse);
   });
+
+  test('PlaybackSourceResolver resolves uburoomLocalPath as localFile with reporting disabled', () async {
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    final manager = MultiServerManager();
+    addTearDown(() async {
+      manager.dispose();
+      await db.close();
+    });
+
+    final resolver = PlaybackSourceResolver(serverManager: manager, database: db);
+    final item = testMediaItem(id: 'local-1', title: 'Local Item', raw: {'uburoomLocalPath': 'C:/media/video.mp4'});
+    final context = await resolver.resolve(
+      PlaybackInitializationOptions(metadata: item, selectedMediaIndex: 0),
+      offlineLibraryMode: false,
+    );
+
+    expect(context.sourceKind, PlaybackSourceKind.localFile);
+    expect(context.result.isOffline, isTrue);
+    expect(context.result.isTranscoding, isFalse);
+    expect(context.result.videoUrl, 'C:/media/video.mp4');
+    expect(context.reportingMode, PlaybackReportingMode.disabled);
+    expect(context.reportingClient, isNull);
+    expect(context.streamHeaders, const {});
+  });
+
+  test(
+    'PlaybackSourceResolver resolves uburoomMediaUrl with uburoomHeaders as remoteDirect and preserves Authorization header',
+    () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      final manager = MultiServerManager();
+      addTearDown(() async {
+        manager.dispose();
+        await db.close();
+      });
+
+      final resolver = PlaybackSourceResolver(serverManager: manager, database: db);
+      final item = testMediaItem(
+        id: 'remote-1',
+        title: 'Remote Stream',
+        raw: {
+          'uburoomMediaUrl': 'http://localhost:6767/api/watch/media/grant-1/start',
+          'uburoomHeaders': {'Authorization': 'Bearer test-bearer-token-64hex'},
+        },
+      );
+      final context = await resolver.resolve(
+        PlaybackInitializationOptions(metadata: item, selectedMediaIndex: 0),
+        offlineLibraryMode: false,
+      );
+
+      expect(context.sourceKind, PlaybackSourceKind.remoteDirect);
+      expect(context.result.isOffline, isFalse);
+      expect(context.result.isTranscoding, isFalse);
+      expect(context.result.videoUrl, 'http://localhost:6767/api/watch/media/grant-1/start');
+      expect(context.reportingMode, PlaybackReportingMode.disabled);
+      expect(context.reportingClient, isNull);
+      expect(context.streamHeaders, {'Authorization': 'Bearer test-bearer-token-64hex'});
+    },
+  );
+
+  test('PlaybackSourceResolver resolves uburoomMediaUrl with uburoomIsTranscoding as remoteTranscode', () async {
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    final manager = MultiServerManager();
+    addTearDown(() async {
+      manager.dispose();
+      await db.close();
+    });
+
+    final resolver = PlaybackSourceResolver(serverManager: manager, database: db);
+    final item = testMediaItem(
+      id: 'transcode-1',
+      title: 'Transcoding Stream',
+      raw: {
+        'uburoomMediaUrl': 'http://localhost:6767/api/watch/media/grant-1/hls/master.m3u8',
+        'uburoomIsTranscoding': true,
+      },
+    );
+    final context = await resolver.resolve(
+      PlaybackInitializationOptions(metadata: item, selectedMediaIndex: 0),
+      offlineLibraryMode: false,
+    );
+
+    expect(context.sourceKind, PlaybackSourceKind.remoteTranscode);
+    expect(context.result.isOffline, isFalse);
+    expect(context.result.isTranscoding, isTrue);
+    expect(context.result.videoUrl, 'http://localhost:6767/api/watch/media/grant-1/hls/master.m3u8');
+    expect(context.reportingMode, PlaybackReportingMode.disabled);
+    expect(context.reportingClient, isNull);
+    expect(context.streamHeaders, const {});
+  });
+
+  test('PlaybackSourceResolver resolves uburoomMediaUrl with uburoomSubtitleUrl populating subtitleSidecars', () async {
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    final manager = MultiServerManager();
+    addTearDown(() async {
+      manager.dispose();
+      await db.close();
+    });
+
+    final resolver = PlaybackSourceResolver(serverManager: manager, database: db);
+    final item = testMediaItem(
+      id: 'remote-sub-1',
+      title: 'Remote Stream With Subtitles',
+      raw: {
+        'uburoomMediaUrl': 'http://localhost:6767/api/watch/media/grant-1/start',
+        'uburoomSubtitleUrl': 'http://localhost:6767/api/watch/media/grant-1/subtitles.vtt',
+      },
+    );
+    final context = await resolver.resolve(
+      PlaybackInitializationOptions(metadata: item, selectedMediaIndex: 0),
+      offlineLibraryMode: false,
+    );
+
+    expect(context.result.subtitleSidecars, hasLength(1));
+    final sidecar = context.result.subtitleSidecars.first;
+    expect(sidecar.sourceStreamId, isNull);
+    expect(sidecar.preload, isTrue);
+    expect(sidecar.track.uri, 'http://localhost:6767/api/watch/media/grant-1/subtitles.vtt');
+    expect(sidecar.track.title, 'Uburoom Subtitles');
+    expect(sidecar.track.isDefault, isTrue);
+    expect(sidecar.track.isExternal, isTrue);
+  });
+
+  test(
+    'PlaybackSourceResolver resolves uburoomLocalPath with uburoomSubtitleUrl populating subtitleSidecars',
+    () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      final manager = MultiServerManager();
+      addTearDown(() async {
+        manager.dispose();
+        await db.close();
+      });
+
+      final resolver = PlaybackSourceResolver(serverManager: manager, database: db);
+      final item = testMediaItem(
+        id: 'local-sub-1',
+        title: 'Local Item With Subtitles',
+        raw: {
+          'uburoomLocalPath': 'C:/media/video.mp4',
+          'uburoomSubtitleUrl': 'http://localhost:6767/api/watch/media/grant-local/subtitles.vtt',
+        },
+      );
+      final context = await resolver.resolve(
+        PlaybackInitializationOptions(metadata: item, selectedMediaIndex: 0),
+        offlineLibraryMode: false,
+      );
+
+      expect(context.sourceKind, PlaybackSourceKind.localFile);
+      expect(context.result.isOffline, isTrue);
+      expect(context.result.videoUrl, 'C:/media/video.mp4');
+      expect(context.result.subtitleSidecars, hasLength(1));
+      final sidecar = context.result.subtitleSidecars.first;
+      expect(sidecar.sourceStreamId, isNull);
+      expect(sidecar.preload, isTrue);
+      expect(sidecar.track.uri, 'http://localhost:6767/api/watch/media/grant-local/subtitles.vtt');
+      expect(sidecar.track.title, 'Uburoom Subtitles');
+      expect(sidecar.track.isDefault, isTrue);
+      expect(sidecar.track.isExternal, isTrue);
+    },
+  );
 }

@@ -776,6 +776,154 @@ void main() {
         reconciler.dispose();
       });
     });
+
+    test(
+      'immediately pauses adapter, aligns frame, and emits sync-quality telemetry on snapshot transition to paused',
+      () {
+        fakeAsync((async) {
+          final clockSync = ClockSync();
+          _seedClock(clockSync);
+
+          final socketService = _TestSocketService(clockSync: clockSync);
+          final player = _SyncPlayer(
+            hasRenderedFrame: true,
+            playing: true,
+            position: const Duration(milliseconds: 5000),
+          );
+          final seeks = <Duration>[];
+          final adapter = PlezyPlayerAdapter(
+            player: player,
+            copy: _testCopy(),
+            commands: PlayerCommands(
+              play: () => player.play(),
+              pause: () => player.pause(),
+              seek: (pos) async {
+                seeks.add(pos);
+                return player.seek(pos);
+              },
+              setRate: (rate) => player.setRate(rate),
+            ),
+          );
+
+          final reconciler = GuestPlaybackReconciler(
+            adapter: adapter,
+            clockSync: clockSync,
+            socketService: socketService,
+            roomId: '3886f4cb-20d4-4a49-a29d-4766e4a2a6d8',
+            viewerId: '9886f4cb-20d4-4a49-a29d-4766e4a2a6d8',
+            listenToRoomStateStream: false,
+          );
+
+          final serverNow = clockSync.serverNow;
+          // Room was actively playing at 5000ms
+          reconciler.updateRoomSnapshot({
+            'epoch': 'epoch-1',
+            'revision': 1,
+            'mediaVersion': 'mv-1',
+            'streamVersion': 'sv-1',
+            'waitingForReady': false,
+            'serverNow': serverNow,
+            'startAt': serverNow - 5000,
+            'pauseAt': 0,
+            'state': {'paused': false, 'rate': 1.0, 'position': 5.0},
+          });
+
+          // Player is playing at 5000ms, sync quality sent for playing
+          expect(player.state.playing, isTrue);
+          expect(socketService.syncQualities, hasLength(1));
+          expect(socketService.syncQualities.last['status'], 'playing');
+
+          // Advance playback slightly: player moves to 5600ms
+          player.seek(const Duration(milliseconds: 5600));
+          seeks.clear();
+
+          // Host pauses room at 5000ms (state.position = 5.0s, drift = 600ms > 250ms)
+          reconciler.updateRoomSnapshot({
+            'epoch': 'epoch-1',
+            'revision': 2,
+            'mediaVersion': 'mv-1',
+            'streamVersion': 'sv-1',
+            'waitingForReady': false,
+            'serverNow': serverNow + 600,
+            'pauseAt': serverNow,
+            'state': {'paused': true, 'rate': 1.0, 'position': 5.0},
+          });
+
+          async.flushMicrotasks();
+
+          // CRITICAL: Must immediately pause and seek without waiting for the 100ms periodic tick
+          expect(player.commandLog, contains('pause'));
+          expect(seeks, hasLength(1));
+          expect(seeks.first.inMilliseconds, 5000);
+
+          // Instant sync-quality dispatch on paused transition
+          expect(socketService.syncQualities, hasLength(2));
+          expect(socketService.syncQualities.last['status'], 'paused');
+
+          reconciler.dispose();
+        });
+      },
+    );
+
+    test('restores playback rate to 1.0 when disposed mid-slew', () {
+      fakeAsync((async) {
+        final clockSync = ClockSync();
+        _seedClock(clockSync);
+
+        final socketService = _TestSocketService(clockSync: clockSync);
+        final player = _SyncPlayer(hasRenderedFrame: true, playing: true, position: const Duration(milliseconds: 1000));
+        final rates = <double>[];
+        final adapter = PlezyPlayerAdapter(
+          player: player,
+          copy: _testCopy(),
+          commands: PlayerCommands(
+            play: () => player.play(),
+            pause: () => player.pause(),
+            seek: (pos) => player.seek(pos),
+            setRate: (rate) async {
+              rates.add(rate);
+              return player.setRate(rate);
+            },
+          ),
+        );
+
+        final reconciler = GuestPlaybackReconciler(
+          adapter: adapter,
+          clockSync: clockSync,
+          socketService: socketService,
+          roomId: 'room-1',
+          viewerId: 'viewer-1',
+          listenToRoomStateStream: false,
+        );
+
+        // Room target is 1600ms (drift = -600ms, slew rate 1.04)
+        final serverNow = clockSync.serverNow;
+        reconciler.updateRoomSnapshot({
+          'epoch': 1,
+          'revision': 1,
+          'mediaVersion': 'mv-1',
+          'streamVersion': 'sv-1',
+          'waitingForReady': false,
+          'startAt': serverNow - 1600,
+          'pauseAt': 0,
+          'state': {'paused': false, 'rate': 1.0},
+        });
+
+        // Run tick so reconciler starts slewing
+        async.elapse(const Duration(milliseconds: 260));
+        async.flushMicrotasks();
+
+        expect(reconciler.isSlewing, isTrue);
+        expect(rates.last, equals(1.04));
+
+        // Disposing while slewing must immediately restore rate to 1.0
+        reconciler.dispose();
+        async.flushMicrotasks();
+
+        expect(rates.last, equals(1.0));
+        expect(player.state.rate, equals(1.0));
+      });
+    });
   });
 
   group('WatchTogetherProvider Uburoom integration', () {

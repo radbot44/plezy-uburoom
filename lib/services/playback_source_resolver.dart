@@ -1,8 +1,10 @@
 import '../database/app_database.dart';
 import '../media/ids.dart';
 import '../media/media_backend.dart';
+import '../media/media_item.dart';
 import '../media/media_kind.dart';
 import '../media/media_server_client.dart';
+import '../mpv/models.dart';
 import 'multi_server_manager.dart';
 import 'playback_context.dart';
 import 'playback_initialization_service.dart';
@@ -27,9 +29,11 @@ class PlaybackSourceResolver {
     final metadata = options.metadata;
     final uburoomLocalPath = metadata.raw?['uburoomLocalPath'] as String?;
     if (uburoomLocalPath != null) {
+      final subtitleSidecars = _uburoomSubtitleSidecars(metadata);
       final result = PlaybackInitializationResult(
         availableVersions: const [],
         videoUrl: uburoomLocalPath,
+        subtitleSidecars: subtitleSidecars,
         isOffline: true,
         isTranscoding: false,
       );
@@ -47,19 +51,22 @@ class PlaybackSourceResolver {
       final headers = (metadata.raw?['uburoomHeaders'] as Map<dynamic, dynamic>?)?.map(
         (k, v) => MapEntry(k.toString(), v.toString()),
       );
+      final isTranscoding = metadata.raw?['uburoomIsTranscoding'] == true;
+      final subtitleSidecars = _uburoomSubtitleSidecars(metadata);
       final result = PlaybackInitializationResult(
         availableVersions: const [],
         videoUrl: uburoomUrl,
+        subtitleSidecars: subtitleSidecars,
         isOffline: false,
-        isTranscoding: false,
+        isTranscoding: isTranscoding,
       );
       return PlaybackContext(
         metadata: metadata,
         result: result,
-        sourceKind: PlaybackSourceKind.remoteDirect,
+        sourceKind: isTranscoding ? PlaybackSourceKind.remoteTranscode : PlaybackSourceKind.remoteDirect,
         reportingMode: PlaybackReportingMode.disabled,
         reportingClient: null,
-        streamHeaders: headers,
+        streamHeaders: headers ?? const {},
       );
     }
     final playbackClient = _playbackClient(serverIdOrNull(metadata.serverId), offlineLibraryMode: offlineLibraryMode);
@@ -140,5 +147,19 @@ class PlaybackSourceResolver {
     }
     if (sourceKind == PlaybackSourceKind.localFile || offlineLibraryMode) return PlaybackReportingMode.offlineQueue;
     return PlaybackReportingMode.disabled;
+  }
+
+  List<PlaybackSubtitleSidecar> _uburoomSubtitleSidecars(MediaItem metadata) {
+    final uburoomSubtitleUrl = metadata.raw?['uburoomSubtitleUrl'] as String?;
+    if (uburoomSubtitleUrl != null && uburoomSubtitleUrl.isNotEmpty) {
+      return [
+        PlaybackSubtitleSidecar(
+          sourceStreamId: null,
+          track: SubtitleTrack.uri(uburoomSubtitleUrl, title: 'Uburoom Subtitles', isDefault: true),
+          preload: true,
+        ),
+      ];
+    }
+    return const [];
   }
 }

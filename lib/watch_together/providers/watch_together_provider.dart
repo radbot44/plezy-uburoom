@@ -133,7 +133,7 @@ class WatchTogetherProvider extends ChangeNotifier {
   UburoomRoomState? _uburoomState;
   WatchCopy? _uburoomCopy;
   String _uburoomDelivery = 'auto';
-  final String _uburoomQuality = 'direct';
+  String _uburoomQuality = 'direct';
   Map<String, dynamic>? _lastUburoomSnapshot;
   StreamSubscription? _uburoomStateSub;
   StreamSubscription? _uburoomConnSub;
@@ -142,6 +142,7 @@ class WatchTogetherProvider extends ChangeNotifier {
   bool get isUburoomSession => _uburoomRoomId != null;
   UburoomRoomState? get uburoomState => _uburoomState;
   String get viewerId => _viewerId;
+  String get uburoomQuality => _uburoomQuality;
 
   owp.WatchParty<WatchCopy>? _party;
   StreamSubscription<owp.PartyState<WatchCopy>>? _stateSubscription;
@@ -706,6 +707,10 @@ class WatchTogetherProvider extends ChangeNotifier {
   @visibleForTesting
   void handleUburoomSnapshotForTest(Map<String, dynamic> snapshot) => unawaited(_handleUburoomSnapshot(snapshot));
 
+  /// For tests: pushes a snapshot through the Uburoom handler and awaits completion.
+  @visibleForTesting
+  Future<void> handleUburoomSnapshotAsyncForTest(Map<String, dynamic> snapshot) => _handleUburoomSnapshot(snapshot);
+
   /// For tests: sends an Uburoom command.
   @visibleForTesting
   Future<void> sendUburoomCommandForTest(String action, [Map<String, dynamic>? args]) =>
@@ -1122,6 +1127,106 @@ class WatchTogetherProvider extends ChangeNotifier {
     }
   }
 
+  /// Skips to the next item in the uburoom room queue or playlist.
+  Future<void> skipToNextInUburoom() async {
+    if (isUburoomSession && isConnected && canControl) {
+      await _sendUburoomCommand('media.next');
+    }
+  }
+
+  /// Removes an item from the uburoom queue.
+  Future<void> removeFromUburoomQueue(String itemId) async {
+    if (!isUburoomSession) return;
+    final roomId = _uburoomRoomId;
+    final socket = _socketService;
+    if (roomId == null || socket == null || !socket.isConnected) return;
+    try {
+      await socket.sendRequest('/api/watch/rooms/$roomId/queue', {'action': 'remove', 'id': itemId});
+    } catch (e) {
+      appLogger.w('WatchTogether: removeFromUburoomQueue failed: $e');
+    }
+  }
+
+  /// Enables or disables automatic queue progression in an uburoom room.
+  Future<void> setUburoomAutoQueue(bool enabled) async {
+    if (!isUburoomSession) return;
+    final roomId = _uburoomRoomId;
+    final socket = _socketService;
+    if (roomId == null || socket == null || !socket.isConnected) return;
+    try {
+      await socket.sendRequest('/api/watch/rooms/$roomId/queue', {'action': 'auto', 'enabled': enabled});
+    } catch (e) {
+      appLogger.w('WatchTogether: setUburoomAutoQueue failed: $e');
+    }
+  }
+
+  /// Reports direct delivery playback failure to uburoom so the server falls
+  /// back to proxy/transcode delivery.
+  Future<void> reportUburoomDeliveryFailure() async {
+    if (!isUburoomSession || _uburoomState?.directDelivery != true) return;
+    final roomId = _uburoomRoomId;
+    final socket = _socketService;
+    if (roomId == null || socket == null || !socket.isConnected) return;
+    try {
+      final res = await socket.sendRequest('/api/watch/rooms/$roomId/delivery', {
+        'viewerId': _viewerId,
+        'mediaVersion': _uburoomState?.mediaVersion,
+        'streamVersion': _uburoomState?.streamVersion,
+      });
+      if (res.isSuccess && res.value is Map) {
+        await _handleUburoomSnapshot(
+          res.value is Map<String, dynamic>
+              ? res.value as Map<String, dynamic>
+              : Map<String, dynamic>.from(res.value as Map),
+        );
+      }
+    } catch (e) {
+      appLogger.w('WatchTogether: reportUburoomDeliveryFailure failed: $e');
+    }
+  }
+
+  /// Sets the stream quality for the current uburoom viewer and re-requests the room snapshot.
+  Future<void> setUburoomQuality(String quality) async {
+    _uburoomQuality = quality;
+    notifyListeners();
+    if (isUburoomSession && _socketService != null && _socketService!.isConnected && _uburoomRoomId != null) {
+      try {
+        final res = await _socketService!.sendRequest(
+          '/api/watch/rooms/$_uburoomRoomId?viewer=$_viewerId&quality=$_uburoomQuality&delivery=$_uburoomDelivery',
+        );
+        await _handleUburoomSnapshot(_uburoomValue(res));
+      } catch (e) {
+        appLogger.w('WatchTogether: setUburoomQuality failed: $e');
+      }
+    }
+  }
+
+  /// Kicks a participant from the uburoom room when host or manager.
+  Future<void> kickUburoomParticipant(String userId) async {
+    if (!isUburoomSession || !(isHost || (_uburoomState?.canManage ?? false))) return;
+    final roomId = _uburoomRoomId;
+    final socket = _socketService;
+    if (roomId == null || socket == null || !socket.isConnected) return;
+    try {
+      await socket.sendRequest('/api/watch/rooms/$roomId/people', {'action': 'kick', 'userId': userId});
+    } catch (e) {
+      appLogger.w('WatchTogether: kickUburoomParticipant failed: $e');
+    }
+  }
+
+  /// Sets a participant's role in the uburoom room when host or manager.
+  Future<void> setUburoomParticipantRole(String userId, String role) async {
+    if (!isUburoomSession || !(isHost || (_uburoomState?.canManage ?? false))) return;
+    final roomId = _uburoomRoomId;
+    final socket = _socketService;
+    if (roomId == null || socket == null || !socket.isConnected) return;
+    try {
+      await socket.sendRequest('/api/watch/rooms/$roomId/people', {'action': 'role', 'userId': userId, 'role': role});
+    } catch (e) {
+      appLogger.w('WatchTogether: setUburoomParticipantRole failed: $e');
+    }
+  }
+
   Future<void> _sendUburoomCommand(String action, [Map<String, dynamic>? args]) async {
     final roomId = _uburoomRoomId;
     final socket = _socketService;
@@ -1327,14 +1432,17 @@ class WatchTogetherProvider extends ChangeNotifier {
 
       // Check if a completed local download exists for this ratingKey
       DownloadedVideoSource? localSource;
+      DownloadedMediaItem? matchedItem;
+      MediaItem? cachedMeta;
       final db = _database;
       if (db != null) {
         try {
           final query = db.select(db.downloadedMedia)..where((tbl) => tbl.ratingKey.equals(ratingKey));
           final items = await query.get();
           for (final item in items) {
+            MediaItem? cached;
             if (items.length > 1 && durationMs > 0) {
-              final cached = await ApiCache.forBackend(
+              cached = await ApiCache.forBackend(
                 MediaBackend.plex,
               ).getMetadata(ServerId(item.serverId), item.ratingKey);
               if (cached != null && cached.durationMs != null && (cached.durationMs! - durationMs).abs() > 3000) {
@@ -1344,6 +1452,18 @@ class WatchTogetherProvider extends ChangeNotifier {
             final src = await resolveDownloadedVideoSource(item, allowAnyDownloadedVersion: true);
             if (src != null) {
               localSource = src;
+              matchedItem = item;
+              if (cached != null) {
+                cachedMeta = cached;
+              } else {
+                try {
+                  cachedMeta = await ApiCache.forBackend(
+                    MediaBackend.plex,
+                  ).getMetadata(ServerId(item.serverId), item.ratingKey);
+                } catch (_) {
+                  // ApiCache may not be initialized in isolated test environments.
+                }
+              }
               break;
             }
           }
@@ -1353,15 +1473,39 @@ class WatchTogetherProvider extends ChangeNotifier {
       }
 
       if (localSource != null) {
-        final localItem = MediaItem(
-          id: ratingKey,
-          backend: MediaBackend.plex,
-          kind: MediaKind.movie,
-          title: title,
-          durationMs: durationMs > 0 ? durationMs : null,
-          serverId: 'uburoom',
-          raw: {'uburoomLocalPath': localSource.path},
-        );
+        final serverBase = _uburoomServerUrl ?? _authService.serverUrl;
+        final localItem = cachedMeta != null
+            ? cachedMeta.copyWith(
+                id: ratingKey,
+                title: title,
+                durationMs: durationMs > 0 ? durationMs : cachedMeta.durationMs,
+                serverId: 'uburoom',
+                raw: {
+                  ...?cachedMeta.raw,
+                  'uburoomLocalPath': localSource.path,
+                  if (matchedItem != null) 'uburoomServerId': matchedItem.serverId,
+                  if (_uburoomState?.subtitleUrl != null &&
+                      _uburoomState!.subtitleUrl!.isNotEmpty &&
+                      serverBase != null)
+                    'uburoomSubtitleUrl': Uri.parse(serverBase).resolve(_uburoomState!.subtitleUrl!).toString(),
+                },
+              )
+            : MediaItem(
+                id: ratingKey,
+                backend: MediaBackend.plex,
+                kind: MediaKind.movie,
+                title: title,
+                durationMs: durationMs > 0 ? durationMs : null,
+                serverId: 'uburoom',
+                raw: {
+                  'uburoomLocalPath': localSource.path,
+                  if (matchedItem != null) 'uburoomServerId': matchedItem.serverId,
+                  if (_uburoomState?.subtitleUrl != null &&
+                      _uburoomState!.subtitleUrl!.isNotEmpty &&
+                      serverBase != null)
+                    'uburoomSubtitleUrl': Uri.parse(serverBase).resolve(_uburoomState!.subtitleUrl!).toString(),
+                },
+              );
         _uburoomCopy = WatchCopy(serverId: 'uburoom', itemId: ratingKey, versionId: '', item: localItem);
         if (_uburoomDelivery != 'local') {
           _uburoomDelivery = 'local';
@@ -1394,7 +1538,7 @@ class WatchTogetherProvider extends ChangeNotifier {
           }
         }
         final serverUrl = _uburoomServerUrl ?? _authService.serverUrl;
-        final mediaUrl = effectiveSnapshot['mediaUrl'] as String?;
+        final mediaUrl = (effectiveSnapshot['mediaUrl'] as String?) ?? _uburoomState?.resolvedStreamUrl;
         MediaItem? syntheticItem;
         if (mediaUrl != null && serverUrl != null) {
           final baseUri = Uri.parse(serverUrl);
@@ -1408,6 +1552,10 @@ class WatchTogetherProvider extends ChangeNotifier {
           final headers = <String, String>{
             if (isSameOrigin && token != null && token.isNotEmpty) 'Authorization': 'Bearer $token',
           };
+          String? resolvedSubtitleUrl;
+          if (_uburoomState?.subtitleUrl != null && _uburoomState!.subtitleUrl!.isNotEmpty) {
+            resolvedSubtitleUrl = baseUri.resolve(_uburoomState!.subtitleUrl!).toString();
+          }
           syntheticItem = MediaItem(
             id: ratingKey,
             backend: MediaBackend.plex,
@@ -1415,7 +1563,12 @@ class WatchTogetherProvider extends ChangeNotifier {
             title: title,
             durationMs: durationMs > 0 ? durationMs : null,
             serverId: 'uburoom',
-            raw: {'uburoomMediaUrl': streamUrl, 'uburoomHeaders': headers},
+            raw: {
+              'uburoomMediaUrl': streamUrl,
+              'uburoomHeaders': headers,
+              'uburoomIsTranscoding': _uburoomState?.format == 'hls' && _uburoomState?.directDelivery != true,
+              'uburoomSubtitleUrl': ?resolvedSubtitleUrl,
+            },
           );
         }
         _uburoomCopy = WatchCopy(serverId: 'uburoom', itemId: ratingKey, versionId: '', item: syntheticItem);

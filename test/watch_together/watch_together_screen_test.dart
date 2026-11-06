@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:material_symbols_icons/symbols.dart';
 import 'package:openwatchparty/openwatchparty.dart' as owp;
 import 'package:plezy/focus/key_event_utils.dart';
 import 'package:plezy/i18n/strings.g.dart';
@@ -11,9 +12,14 @@ import 'package:plezy/watch_together/models/watch_copy.dart';
 import 'package:plezy/watch_together/providers/watch_together_provider.dart';
 import 'package:plezy/watch_together/screens/watch_together_screen.dart';
 import 'package:plezy/watch_together/services/recent_rooms_service.dart';
+import 'package:plezy/watch_together/services/uburoom_auth_service.dart';
+import 'package:plezy/watch_together/services/uburoom_socket_service.dart';
 import 'package:plezy/watch_together/services/watch_party_relays.dart';
 import 'package:plezy/watch_together/widgets/join_session_dialog.dart';
+import 'package:plezy/watch_together/widgets/uburoom_lobby.dart';
+import 'package:plezy/watch_together/widgets/uburoom_room_view.dart';
 import 'package:plezy/watch_together/widgets/watch_room_sections.dart';
+import 'package:provider/provider.dart';
 
 import '../test_helpers/fake_owp_relay.dart';
 import '../test_helpers/library_lookup.dart';
@@ -713,4 +719,628 @@ void main() {
       expect(world.relay.sent('leave'), isEmpty);
     });
   });
+
+  group('uburoom session and lobby', () {
+    testWidgets('UburoomRoomView displays room header with copy button and saved room badge', (tester) async {
+      final socket = _TestUburoomSocketService();
+      final auth = _TestUburoomAuthService();
+      final provider = WatchTogetherProvider(socketService: socket, authService: auth, viewerId: 'viewer-alice');
+      addTearDown(provider.dispose);
+
+      provider.setUburoomSessionForTest(
+        roomId: 'uburoom-room-xyz',
+        serverUrl: 'https://watch.example',
+        token: 'mock-token',
+      );
+      provider.handleUburoomSnapshotForTest({
+        'id': 'uburoom-room-xyz',
+        'name': 'Movie Lounge',
+        'epoch': 'epoch-1',
+        'revision': 1,
+        'durable': true,
+        'isHost': true,
+        'canPlayback': true,
+        'canManage': true,
+        'participants': [
+          {'id': 'viewer-alice', 'name': 'Alice', 'role': 'host', 'isHost': true, 'present': true},
+        ],
+      });
+
+      await tester.pumpWidget(
+        ChangeNotifierProvider<WatchTogetherProvider>.value(
+          value: provider,
+          child: const MaterialApp(home: Scaffold(body: UburoomRoomView())),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Movie Lounge'), findsOneWidget);
+      expect(find.text('uburoom-room-xyz'), findsOneWidget);
+      expect(find.text('Saved room'), findsOneWidget);
+
+      final copyButton = find.byTooltip('Copy room ID');
+      expect(copyButton, findsOneWidget);
+      expect(find.descendant(of: copyButton, matching: find.byIcon(Symbols.content_copy_rounded)), findsOneWidget);
+
+      final copied = mockWatchClipboard();
+      await tester.tap(copyButton);
+      await tester.pump();
+      expect(copied, contains('uburoom-room-xyz'));
+      expect(find.text(t.watchTogether.codeCopied), findsOneWidget);
+    });
+
+    testWidgets('UburoomRoomView displays playback controls including Stop button for host', (tester) async {
+      final socket = _TestUburoomSocketService();
+      final auth = _TestUburoomAuthService();
+      final provider = WatchTogetherProvider(socketService: socket, authService: auth, viewerId: 'viewer-alice');
+      addTearDown(provider.dispose);
+
+      provider.setUburoomSessionForTest(
+        roomId: 'uburoom-room-xyz',
+        serverUrl: 'https://watch.example',
+        token: 'mock-token',
+      );
+      provider.handleUburoomSnapshotForTest({
+        'id': 'uburoom-room-xyz',
+        'name': 'Durable Stream',
+        'epoch': 'epoch-1',
+        'revision': 1,
+        'durable': true,
+        'mediaId': 'plex-123',
+        'title': 'Interstellar',
+        'subtitle': 'Sci-Fi · 2014',
+        'duration': 10140.0,
+        'position': 120.0,
+        'state': {'paused': false},
+        'isHost': true,
+        'canPlayback': true,
+        'canManage': true,
+        'participants': [
+          {
+            'id': 'viewer-alice',
+            'name': 'Alice',
+            'role': 'host',
+            'isHost': true,
+            'present': true,
+            'syncQuality': {'status': 'playing', 'level': 'good'},
+          },
+          {'id': 'viewer-bob', 'name': 'Bob', 'role': 'viewer', 'isHost': false, 'present': false},
+        ],
+      });
+
+      await tester.pumpWidget(
+        ChangeNotifierProvider<WatchTogetherProvider>.value(
+          value: provider,
+          child: const MaterialApp(
+            home: Scaffold(body: SingleChildScrollView(child: UburoomRoomView())),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Interstellar'), findsOneWidget);
+      expect(find.text('Sci-Fi · 2014'), findsOneWidget);
+
+      // Play/Pause button: since paused is false, shows Pause
+      final pauseButton = find.widgetWithText(OutlinedButton, 'Pause');
+      expect(pauseButton, findsOneWidget);
+      await tester.tap(pauseButton);
+      await tester.pump();
+      expect(
+        socket.requests.any((r) => r.$1.endsWith('/command') && r.$2?['command']?['action'] == 'media.pause'),
+        isTrue,
+      );
+
+      // Stop button for host
+      final stopButton = find.widgetWithText(OutlinedButton, 'Stop');
+      expect(stopButton, findsOneWidget);
+      expect(find.descendant(of: stopButton, matching: find.byIcon(Symbols.stop_rounded)), findsOneWidget);
+
+      await tester.tap(stopButton);
+      await tester.pump();
+      // Durable room sends queue.clear
+      expect(
+        socket.requests.any((r) => r.$1.endsWith('/command') && r.$2?['command']?['action'] == 'queue.clear'),
+        isTrue,
+      );
+
+      // Participant list verification
+      expect(find.text('Participants (2)'), findsOneWidget);
+      expect(find.text('Alice (You)'), findsOneWidget);
+      expect(find.text('Host'), findsOneWidget);
+      expect(find.textContaining('Connected'), findsWidgets);
+      expect(find.textContaining('Sync: good'), findsWidgets);
+      expect(find.text('Bob'), findsOneWidget);
+      expect(find.textContaining('Offline'), findsWidgets);
+    });
+
+    testWidgets('UburoomRoomView guest does not see Stop or End room buttons, and non-durable room lacks badge', (
+      tester,
+    ) async {
+      final socket = _TestUburoomSocketService();
+      final auth = _TestUburoomAuthService();
+      final provider = WatchTogetherProvider(socketService: socket, authService: auth, viewerId: 'viewer-bob');
+      addTearDown(provider.dispose);
+
+      provider.setUburoomSessionForTest(
+        roomId: 'uburoom-room-guest',
+        serverUrl: 'https://watch.example',
+        token: 'mock-token',
+      );
+      provider.handleUburoomSnapshotForTest({
+        'id': 'uburoom-room-guest',
+        'name': 'Public Room',
+        'epoch': 'epoch-2',
+        'revision': 1,
+        'durable': false,
+        'mediaId': 'plex-456',
+        'title': 'Inception',
+        'state': {'paused': true},
+        'isHost': false,
+        'canPlayback': true,
+        'canManage': false,
+        'participants': [
+          {'id': 'viewer-charlie', 'name': 'Charlie', 'role': 'host', 'isHost': true, 'present': true},
+          {'id': 'viewer-bob', 'name': 'Bob', 'role': 'viewer', 'isHost': false, 'present': true},
+        ],
+      });
+
+      await tester.pumpWidget(
+        ChangeNotifierProvider<WatchTogetherProvider>.value(
+          value: provider,
+          child: const MaterialApp(
+            home: Scaffold(body: SingleChildScrollView(child: UburoomRoomView())),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Non-durable room does not show Saved room badge
+      expect(find.text('Saved room'), findsNothing);
+
+      // Play button is shown because paused is true
+      final playButton = find.widgetWithText(OutlinedButton, 'Play');
+      expect(playButton, findsOneWidget);
+      await tester.tap(playButton);
+      await tester.pump();
+      expect(
+        socket.requests.any((r) => r.$1.endsWith('/command') && r.$2?['command']?['action'] == 'media.play'),
+        isTrue,
+      );
+
+      // Stop button is NOT shown for guest
+      expect(find.widgetWithText(OutlinedButton, 'Stop'), findsNothing);
+
+      // End room button is NOT shown for guest, but Leave room is shown
+      expect(find.text(t.watchTogether.endRoom), findsNothing);
+      expect(find.text(t.watchTogether.leaveRoom), findsOneWidget);
+    });
+
+    testWidgets('UburoomLobby displays rich room cards with active status, viewer count, playing title and room ID', (
+      tester,
+    ) async {
+      final socket = _TestUburoomSocketService();
+      socket.roomsToReturn = [
+        {'id': 'room-alpha-123', 'name': 'Movie Night', 'active': true, 'viewers': 4, 'title': 'Blade Runner 2049'},
+        {'id': 'room-gamma-789', 'name': 'Gaming Lounge', 'active': true, 'viewers': 1},
+        {'id': 'room-delta-000', 'name': 'Casual Hangout', 'active': true},
+      ];
+      socket.savedRoomsToReturn = [
+        {'id': 'room-beta-456', 'name': 'Anime Club', 'active': false},
+      ];
+      final auth = _TestUburoomAuthService();
+      final provider = WatchTogetherProvider(socketService: socket, authService: auth);
+      addTearDown(provider.dispose);
+
+      await tester.pumpWidget(
+        ChangeNotifierProvider<WatchTogetherProvider>.value(
+          value: provider,
+          child: const MaterialApp(
+            home: Scaffold(body: SingleChildScrollView(child: UburoomLobby())),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Verify rich subtitles
+      expect(find.text('Active room · 4 watching · Blade Runner 2049 · room-alpha-123'), findsOneWidget);
+      expect(find.text('Saved room · room-beta-456'), findsOneWidget);
+      expect(find.text('Active room · 1 watching · room-gamma-789'), findsOneWidget);
+      expect(find.text('Active room · room-delta-000'), findsOneWidget);
+
+      // Verify button labels
+      expect(find.text('Create Room'), findsOneWidget);
+      expect(find.text('Join by name or link'), findsOneWidget);
+      expect(find.text('Uburoom Server Settings'), findsOneWidget);
+      expect(find.text('Refresh'), findsOneWidget);
+
+      // Trailing buttons: Reopen for saved room, Join for active rooms
+      expect(find.text('Reopen'), findsOneWidget);
+      expect(find.text('Join'), findsNWidgets(3));
+
+      // Tapping a saved room triggers reopen then join
+      await tester.tap(find.text('Anime Club'));
+      await tester.pumpAndSettle();
+      expect(socket.requests.any((r) => r.$1 == '/api/watch/rooms/room-beta-456/reopen'), isTrue);
+    });
+
+    testWidgets('UburoomRoomView displays Queue card with items, Auto-queue badge, and Private visibility badge', (
+      tester,
+    ) async {
+      final socket = _TestUburoomSocketService();
+      final auth = _TestUburoomAuthService();
+      final provider = WatchTogetherProvider(socketService: socket, authService: auth, viewerId: 'viewer-alice');
+      addTearDown(provider.dispose);
+
+      provider.setUburoomSessionForTest(
+        roomId: 'uburoom-room-private',
+        serverUrl: 'https://watch.example',
+        token: 'mock-token',
+      );
+      provider.handleUburoomSnapshotForTest({
+        'id': 'uburoom-room-private',
+        'name': 'Secret Cinema',
+        'epoch': 'epoch-1',
+        'revision': 1,
+        'durable': true,
+        'visibility': 'private',
+        'autoQueue': true,
+        'mediaId': 'plex-1',
+        'title': 'Batman Begins',
+        'queue': [
+          {
+            'id': 'q-1',
+            'mediaId': 'plex-2',
+            'title': 'The Dark Knight',
+            'subtitle': 'Action · 2008',
+            'durationSeconds': 9120.0,
+          },
+          {'id': 'q-2', 'mediaId': 'plex-3', 'title': 'The Dark Knight Rises', 'durationSeconds': 9840.0},
+        ],
+        'isHost': true,
+        'canPlayback': true,
+        'participants': [
+          {'id': 'viewer-alice', 'name': 'Alice', 'role': 'host', 'isHost': true, 'present': true},
+        ],
+      });
+
+      await tester.pumpWidget(
+        ChangeNotifierProvider<WatchTogetherProvider>.value(
+          value: provider,
+          child: const MaterialApp(
+            home: Scaffold(body: SingleChildScrollView(child: UburoomRoomView())),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Badges in header
+      expect(find.text('Saved room'), findsOneWidget);
+      expect(find.text('Private'), findsOneWidget);
+
+      // Queue card header & Auto-queue badge
+      expect(find.text('Queue (2)'), findsOneWidget);
+      expect(find.text('Auto-queue'), findsOneWidget);
+
+      // Queue items
+      expect(find.text('1'), findsOneWidget);
+      expect(find.text('The Dark Knight'), findsOneWidget);
+      expect(find.text('Action · 2008 · 2:32:00'), findsOneWidget);
+
+      expect(find.text('2'), findsOneWidget);
+      expect(find.text('The Dark Knight Rises'), findsOneWidget);
+      expect(find.text('2:44:00'), findsOneWidget);
+    });
+
+    testWidgets('UburoomRoomView displays Queue is empty for durable room with empty queue', (tester) async {
+      final socket = _TestUburoomSocketService();
+      final auth = _TestUburoomAuthService();
+      final provider = WatchTogetherProvider(socketService: socket, authService: auth, viewerId: 'viewer-alice');
+      addTearDown(provider.dispose);
+
+      provider.setUburoomSessionForTest(
+        roomId: 'uburoom-empty-queue',
+        serverUrl: 'https://watch.example',
+        token: 'mock-token',
+      );
+      provider.handleUburoomSnapshotForTest({
+        'id': 'uburoom-empty-queue',
+        'name': 'Empty Queue Lounge',
+        'epoch': 'epoch-1',
+        'revision': 1,
+        'durable': true,
+        'queue': <Map<String, dynamic>>[],
+        'participants': [
+          {'id': 'viewer-alice', 'name': 'Alice', 'role': 'host', 'isHost': true, 'present': true},
+        ],
+      });
+
+      await tester.pumpWidget(
+        ChangeNotifierProvider<WatchTogetherProvider>.value(
+          value: provider,
+          child: const MaterialApp(
+            home: Scaffold(body: SingleChildScrollView(child: UburoomRoomView())),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Queue (0)'), findsOneWidget);
+      expect(find.text('Queue is empty'), findsOneWidget);
+      expect(find.text('Auto-queue'), findsNothing);
+    });
+
+    testWidgets('UburoomLobby displays Private in room card subtitle when visibility is private', (tester) async {
+      final socket = _TestUburoomSocketService();
+      socket.roomsToReturn = [
+        {
+          'id': 'room-priv-1',
+          'name': 'VIP Screening',
+          'active': true,
+          'visibility': 'private',
+          'viewers': 2,
+          'title': 'Dune',
+        },
+        {'id': 'room-pub-1', 'name': 'Public Screening', 'active': true, 'visibility': 'public', 'viewers': 3},
+      ];
+      socket.savedRoomsToReturn = [
+        {'id': 'room-priv-2', 'name': 'Secret Archive', 'active': false, 'visibility': 'private'},
+      ];
+      final auth = _TestUburoomAuthService();
+      final provider = WatchTogetherProvider(socketService: socket, authService: auth);
+      addTearDown(provider.dispose);
+
+      await tester.pumpWidget(
+        ChangeNotifierProvider<WatchTogetherProvider>.value(
+          value: provider,
+          child: const MaterialApp(
+            home: Scaffold(body: SingleChildScrollView(child: UburoomLobby())),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Private active room subtitle includes 'Private' after status
+      expect(find.text('Active room · Private · 2 watching · Dune · room-priv-1'), findsOneWidget);
+
+      // Public active room subtitle does NOT include 'Private'
+      expect(find.text('Active room · 3 watching · room-pub-1'), findsOneWidget);
+
+      // Private saved room subtitle includes 'Private'
+      expect(find.text('Saved room · Private · room-priv-2'), findsOneWidget);
+    });
+
+    testWidgets('UburoomRoomView tapping Next dispatches media.next via skipToNextInUburoom', (tester) async {
+      final socket = _TestUburoomSocketService();
+      final auth = _TestUburoomAuthService();
+      final provider = WatchTogetherProvider(socketService: socket, authService: auth, viewerId: 'viewer-alice');
+      addTearDown(provider.dispose);
+
+      provider.setUburoomSessionForTest(
+        roomId: 'uburoom-room-queue-test',
+        serverUrl: 'https://watch.example',
+        token: 'mock-token',
+      );
+      provider.handleUburoomSnapshotForTest({
+        'id': 'uburoom-room-queue-test',
+        'name': 'Queue Test Room',
+        'epoch': 'epoch-1',
+        'revision': 1,
+        'durable': true,
+        'state': {'paused': false, 'time': 100.0},
+        'mediaId': 'plex-1',
+        'title': 'Item 1',
+        'durationSeconds': 7200.0,
+        'queue': [
+          {'id': 'q-next-1', 'mediaId': 'plex-2', 'title': 'Item 2', 'durationSeconds': 5000.0},
+        ],
+        'isHost': true,
+        'canPlayback': true,
+        'participants': [
+          {'id': 'viewer-alice', 'name': 'Alice', 'role': 'host', 'isHost': true, 'present': true},
+        ],
+      });
+
+      await tester.pumpWidget(
+        ChangeNotifierProvider<WatchTogetherProvider>.value(
+          value: provider,
+          child: const MaterialApp(
+            home: Scaffold(body: SingleChildScrollView(child: UburoomRoomView())),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final nextButton = find.widgetWithText(OutlinedButton, 'Next');
+      expect(nextButton, findsOneWidget);
+      await tester.tap(nextButton);
+      await tester.pumpAndSettle();
+
+      expect(
+        socket.requests.any(
+          (r) =>
+              r.$1 == '/api/watch/rooms/uburoom-room-queue-test/command' &&
+              (r.$2?['command'] as Map?)?['action'] == 'media.next',
+        ),
+        isTrue,
+      );
+    });
+
+    testWidgets('UburoomRoomView tapping Remove from queue on a queue tile dispatches remove queue request', (
+      tester,
+    ) async {
+      final socket = _TestUburoomSocketService();
+      final auth = _TestUburoomAuthService();
+      final provider = WatchTogetherProvider(socketService: socket, authService: auth, viewerId: 'viewer-alice');
+      addTearDown(provider.dispose);
+
+      provider.setUburoomSessionForTest(
+        roomId: 'uburoom-room-queue-test',
+        serverUrl: 'https://watch.example',
+        token: 'mock-token',
+      );
+      provider.handleUburoomSnapshotForTest({
+        'id': 'uburoom-room-queue-test',
+        'name': 'Queue Test Room',
+        'epoch': 'epoch-1',
+        'revision': 1,
+        'durable': true,
+        'state': {'paused': false, 'time': 100.0},
+        'mediaId': 'plex-1',
+        'title': 'Item 1',
+        'durationSeconds': 7200.0,
+        'queue': [
+          {'id': 'q-remove-1', 'mediaId': 'plex-2', 'title': 'Item 2', 'durationSeconds': 5000.0},
+        ],
+        'isHost': true,
+        'canPlayback': true,
+        'participants': [
+          {'id': 'viewer-alice', 'name': 'Alice', 'role': 'host', 'isHost': true, 'present': true},
+        ],
+      });
+
+      await tester.pumpWidget(
+        ChangeNotifierProvider<WatchTogetherProvider>.value(
+          value: provider,
+          child: const MaterialApp(
+            home: Scaffold(body: SingleChildScrollView(child: UburoomRoomView())),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final removeBtn = find.byTooltip('Remove from queue');
+      expect(removeBtn, findsOneWidget);
+      await tester.tap(removeBtn);
+      await tester.pumpAndSettle();
+
+      expect(
+        socket.requests.any(
+          (r) =>
+              r.$1 == '/api/watch/rooms/uburoom-room-queue-test/queue' &&
+              r.$2?['action'] == 'remove' &&
+              r.$2?['id'] == 'q-remove-1',
+        ),
+        isTrue,
+      );
+    });
+
+    testWidgets('UburoomRoomView tapping Auto-queue chip dispatches auto queue request', (tester) async {
+      final socket = _TestUburoomSocketService();
+      final auth = _TestUburoomAuthService();
+      final provider = WatchTogetherProvider(socketService: socket, authService: auth, viewerId: 'viewer-alice');
+      addTearDown(provider.dispose);
+
+      provider.setUburoomSessionForTest(
+        roomId: 'uburoom-room-queue-test',
+        serverUrl: 'https://watch.example',
+        token: 'mock-token',
+      );
+      provider.handleUburoomSnapshotForTest({
+        'id': 'uburoom-room-queue-test',
+        'name': 'Queue Test Room',
+        'epoch': 'epoch-1',
+        'revision': 1,
+        'durable': true,
+        'autoQueue': true,
+        'state': {'paused': false, 'time': 100.0},
+        'mediaId': 'plex-1',
+        'title': 'Item 1',
+        'durationSeconds': 7200.0,
+        'queue': [
+          {'id': 'q-1', 'mediaId': 'plex-2', 'title': 'Item 2', 'durationSeconds': 5000.0},
+        ],
+        'isHost': true,
+        'canPlayback': true,
+        'participants': [
+          {'id': 'viewer-alice', 'name': 'Alice', 'role': 'host', 'isHost': true, 'present': true},
+        ],
+      });
+
+      await tester.pumpWidget(
+        ChangeNotifierProvider<WatchTogetherProvider>.value(
+          value: provider,
+          child: const MaterialApp(
+            home: Scaffold(body: SingleChildScrollView(child: UburoomRoomView())),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final autoQueueChip = find.widgetWithText(FilterChip, 'Auto-queue');
+      expect(autoQueueChip, findsOneWidget);
+      await tester.tap(autoQueueChip);
+      await tester.pumpAndSettle();
+
+      expect(
+        socket.requests.any(
+          (r) =>
+              r.$1 == '/api/watch/rooms/uburoom-room-queue-test/queue' &&
+              r.$2?['action'] == 'auto' &&
+              r.$2?['enabled'] == false,
+        ),
+        isTrue,
+      );
+    });
+  });
+}
+
+class _TestUburoomAuthService extends UburoomAuthService {
+  @override
+  String? get serverUrl => 'https://watch.example';
+
+  @override
+  Future<String?> getToken() async => 'mock-token';
+}
+
+class _TestUburoomSocketService extends UburoomSocketService {
+  final requests = <(String, Map<String, dynamic>?)>[];
+  List<Map<String, dynamic>> roomsToReturn = [];
+  List<Map<String, dynamic>> savedRoomsToReturn = [];
+  Map<String, dynamic>? roomSnapshotToReturn;
+
+  @override
+  UburoomConnectionState get state => UburoomConnectionState.connected;
+
+  @override
+  bool get isConnected => true;
+
+  @override
+  String get serverUrl => 'https://watch.example';
+
+  @override
+  String get token => 'mock-token';
+
+  @override
+  Future<UburoomResponse> sendRequest(String path, [Map<String, dynamic>? data]) async {
+    requests.add((path, data));
+    if (path == '/api/watch/rooms' && data == null) {
+      return UburoomResponse(id: requests.length, status: 200, value: {'rooms': roomsToReturn});
+    }
+    if (path.startsWith('/api/watch/rooms/saved')) {
+      return UburoomResponse(
+        id: requests.length,
+        status: 200,
+        value: {'rooms': savedRoomsToReturn, 'total': savedRoomsToReturn.length},
+      );
+    }
+    if (path.startsWith('/api/watch/rooms/') && path.contains('?')) {
+      return UburoomResponse(
+        id: requests.length,
+        status: 200,
+        value:
+            roomSnapshotToReturn ??
+            {
+              'id': 'test-room-id',
+              'epoch': 'epoch-1',
+              'revision': 1,
+              'state': {'paused': true},
+            },
+      );
+    }
+    if (path.endsWith('/reopen')) {
+      return UburoomResponse(id: requests.length, status: 200, value: {'status': 'reopened'});
+    }
+    return UburoomResponse(id: requests.length, status: 200, value: {'status': 'applied'});
+  }
 }

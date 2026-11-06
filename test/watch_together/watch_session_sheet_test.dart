@@ -1,21 +1,35 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:drift/drift.dart' hide isNull;
+import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:openwatchparty/openwatchparty.dart' as owp;
+import 'package:plezy/database/app_database.dart';
 import 'package:plezy/focus/key_event_utils.dart';
 import 'package:plezy/i18n/strings.g.dart';
+import 'package:plezy/media/ids.dart';
+import 'package:plezy/models/download_models.dart';
+import 'package:plezy/services/download_storage_service.dart';
 import 'package:plezy/services/settings_service.dart';
 import 'package:plezy/utils/platform_detector.dart';
 import 'package:plezy/watch_together/models/watch_copy.dart';
 import 'package:plezy/watch_together/providers/watch_together_provider.dart';
+import 'package:plezy/watch_together/services/clock_sync.dart';
+import 'package:plezy/watch_together/services/uburoom_auth_service.dart';
+import 'package:plezy/watch_together/services/uburoom_socket_service.dart';
 import 'package:plezy/watch_together/widgets/watch_labels.dart';
 import 'package:plezy/watch_together/widgets/watch_room_sections.dart';
 import 'package:plezy/watch_together/widgets/watch_session_sheet.dart';
 import 'package:plezy/watch_together/widgets/watch_together_overlay.dart';
 
+import '../test_helpers/io_fakes.dart';
 import '../test_helpers/prefs.dart';
 import '../test_helpers/watch_room_harness.dart';
+import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 
 void _sheetTest(String description, Future<void> Function(WidgetTester tester, WatchRoomHarness world) body) {
   testWidgets(description, (tester) async {
@@ -56,10 +70,10 @@ Future<void> _openSheetWithKeys(WidgetTester tester, WatchTogetherProvider provi
   expect(find.byType(WatchSessionSheet), findsOneWidget);
 }
 
-Future<void> _tap(WidgetTester tester, Finder finder) async {
+Future<void> _tap(WidgetTester tester, Finder finder, {bool warnIfMissed = false}) async {
   await tester.ensureVisible(finder);
   await tester.pump();
-  await tester.tap(finder);
+  await tester.tap(finder, warnIfMissed: warnIfMissed);
   await settleWatchFrames(tester);
 }
 
@@ -460,5 +474,479 @@ void main() {
       expect(world.relay.sent('kick'), isEmpty);
       expect(guest.isInSession, isTrue);
     });
+  });
+
+  group('uburoom session', () {
+    _uburoomTest(
+      'displays active uburoom media title, local delivery mode, participant count, and hides OWP sync offset and host settings',
+      (tester, provider, socket, db, tempDir) async {
+        final copied = mockWatchClipboard();
+        final tempVideo = File('${tempDir.path}/video.mp4')..writeAsBytesSync([0]);
+        await db
+            .into(db.downloadedMedia)
+            .insert(
+              DownloadedMediaCompanion.insert(
+                serverId: ServerId('uburoom'),
+                ratingKey: 'media-101',
+                globalKey: 'uburoom:media-101',
+                type: 'movie',
+                status: DownloadStatus.completed.index,
+                videoFilePath: Value(tempVideo.path),
+              ),
+            );
+
+        provider.setUburoomSessionForTest(
+          roomId: 'room-ubu-42',
+          serverUrl: 'http://localhost:6767',
+          token: 'test-token',
+        );
+        provider.debugUburoomDelivery = 'local';
+        final snapshot = {
+          'id': 'room-ubu-42',
+          'roomName': 'Sci-Fi Friday',
+          'epoch': 'epoch-1',
+          'revision': 1,
+          'mediaId': 'media-101',
+          'title': 'Blade Runner 2049',
+          'subtitle': 'Sci-Fi · Action',
+          'isHost': true,
+          'canPlayback': true,
+          'canManage': true,
+          'viewers': 2,
+          'participants': [
+            {'id': 'viewer-host-1', 'name': 'Alice', 'role': 'host', 'isHost': true, 'present': true},
+            {
+              'id': 'viewer-guest-2',
+              'name': 'Bob',
+              'role': 'viewer',
+              'isHost': false,
+              'present': true,
+              'syncQuality': {'status': 'playing', 'level': 'excellent', 'score': 1.0},
+            },
+          ],
+          'state': {'position': 120.0, 'duration': 9840.0, 'paused': true, 'rate': 1.0},
+        };
+        socket.currentSnapshot = snapshot;
+        await tester.runAsync(() async {
+          provider.handleUburoomSnapshotForTest(snapshot);
+          await pumpEventQueue();
+        });
+
+        await _openSheet(tester, provider);
+
+        // Header tile displays roomName and copies roomCode on tap
+        expect(find.text('Sci-Fi Friday'), findsOneWidget);
+        expect(find.text('${t.watchTogether.connected} · ${t.watchTogether.participantCount(n: 2)}'), findsOneWidget);
+        await _tap(tester, find.text('Sci-Fi Friday'));
+        expect(copied, ['room-ubu-42']);
+
+        // Media tile shows title and local file summary
+        expect(find.text('Blade Runner 2049'), findsOneWidget);
+        expect(find.text('Sci-Fi · Action · Local file'), findsOneWidget);
+
+        // OWP sync offset and OWP host settings are hidden in uburoom session
+        expect(find.text(t.watchTogether.syncOffset), findsNothing);
+        expect(find.text(t.watchTogether.letEveryoneControl), findsNothing);
+
+        // Open Media page
+        await _tap(tester, find.text('Blade Runner 2049'));
+        expect(find.byType(WatchMediaPage), findsOneWidget);
+        expect(find.text('Blade Runner 2049'), findsWidgets);
+        expect(find.text('Sci-Fi · Action'), findsOneWidget);
+        expect(find.text('Playing downloaded local file'), findsOneWidget);
+        expect(find.text(t.common.play), findsOneWidget);
+        expect(find.text(t.watchTogether.stopMedia), findsOneWidget);
+
+        // Tap Play
+        await _tap(tester, find.text(t.common.play));
+        expect(socket.sentRequests.any((r) => (r['data']?['command']?['action'] ?? '') == 'media.play'), isTrue);
+
+        await _back(tester);
+        expect(find.byType(WatchSessionSheet), findsOneWidget);
+
+        // Open Participants page
+        await _tap(tester, find.text(t.watchTogether.participants));
+        expect(find.byType(WatchParticipantsPage), findsOneWidget);
+        expect(
+          find.descendant(
+            of: _row(t.watchTogether.nameYou(name: 'Alice')),
+            matching: find.byType(WatchHostBadge),
+          ),
+          findsOneWidget,
+        );
+        expect(find.textContaining('Sync: excellent'), findsOneWidget);
+
+        // Host cannot manage uburoom participants with OWP actions
+        await _tap(tester, _row('Bob'));
+        expect(find.byType(WatchParticipantActionsPage), findsNothing);
+
+        await _back(tester);
+        expect(find.byType(WatchSessionSheet), findsOneWidget);
+      },
+    );
+
+    _uburoomTest('displays streaming delivery mode and Synced with uburoom when deliveryMode is auto', (
+      tester,
+      provider,
+      socket,
+      db,
+      tempDir,
+    ) async {
+      provider.setUburoomSessionForTest(
+        roomId: 'room-ubu-stream',
+        serverUrl: 'http://localhost:6767',
+        token: 'test-token',
+      );
+      final snapshot = {
+        'id': 'room-ubu-stream',
+        'roomName': 'Live Stream Room',
+        'epoch': 'epoch-1',
+        'revision': 1,
+        'mediaId': 'media-202',
+        'title': 'Dune',
+        'subtitle': '',
+        'mediaUrl': '/api/watch/media/grant-1/start',
+        'isHost': false,
+        'canPlayback': true,
+        'canManage': false,
+        'viewers': 1,
+        'participants': [
+          {'id': 'viewer-host-1', 'name': 'Viewer', 'role': 'viewer', 'isHost': false, 'present': true},
+        ],
+        'state': {'position': 10.0, 'duration': 6000.0, 'paused': false, 'rate': 1.0},
+      };
+      socket.currentSnapshot = snapshot;
+      await tester.runAsync(() async {
+        provider.handleUburoomSnapshotForTest(snapshot);
+        await pumpEventQueue();
+      });
+
+      await _openSheet(tester, provider);
+
+      expect(find.text('Dune'), findsOneWidget);
+      expect(find.text('Synced with uburoom'), findsOneWidget);
+
+      await _tap(tester, find.text('Dune'));
+      expect(find.byType(WatchMediaPage), findsOneWidget);
+      expect(find.text('Streaming from uburoom'), findsOneWidget);
+      expect(find.text(t.common.pause), findsOneWidget);
+      expect(find.text(t.watchTogether.stopMedia), findsNothing, reason: 'guest cannot stop media');
+    });
+
+    _uburoomTest('displays nothing playing state when uburoom mediaId is absent', (
+      tester,
+      provider,
+      socket,
+      db,
+      tempDir,
+    ) async {
+      provider.setUburoomSessionForTest(
+        roomId: 'room-ubu-idle',
+        serverUrl: 'http://localhost:6767',
+        token: 'test-token',
+      );
+      final snapshot = {
+        'id': 'room-ubu-idle',
+        'roomName': 'Lobby',
+        'epoch': 'epoch-1',
+        'revision': 1,
+        'mediaId': null,
+        'title': '',
+        'subtitle': '',
+        'isHost': true,
+        'canPlayback': false,
+        'canManage': true,
+        'viewers': 1,
+        'participants': [
+          {'id': 'viewer-host-1', 'name': 'Host', 'role': 'host', 'isHost': true, 'present': true},
+        ],
+        'state': {'paused': true},
+      };
+      socket.currentSnapshot = snapshot;
+      await tester.runAsync(() async {
+        provider.handleUburoomSnapshotForTest(snapshot);
+        await pumpEventQueue();
+      });
+
+      await _openSheet(tester, provider);
+
+      expect(find.text(t.watchTogether.nothingPlaying), findsOneWidget);
+
+      await _tap(tester, find.text(t.watchTogether.nothingPlaying));
+      expect(find.byType(WatchMediaPage), findsOneWidget);
+      expect(find.text(t.watchTogether.nothingPlayingHost), findsOneWidget);
+      expect(find.text(t.common.play), findsNothing);
+      expect(find.text(t.watchTogether.stopMedia), findsNothing);
+    });
+
+    _uburoomTest('displays queue count in sheet and renders Up Next list with autoQueue in media page', (
+      tester,
+      provider,
+      socket,
+      db,
+      tempDir,
+    ) async {
+      provider.setUburoomSessionForTest(
+        roomId: 'room-ubu-queue',
+        serverUrl: 'http://localhost:6767',
+        token: 'test-token',
+      );
+      final snapshot = {
+        'id': 'room-ubu-queue',
+        'roomName': 'Queue Test Room',
+        'epoch': 'epoch-1',
+        'revision': 1,
+        'mediaId': 'media-1',
+        'title': 'Dune',
+        'subtitle': 'Part One',
+        'mediaUrl': '/api/watch/media/grant-1/start',
+        'isHost': false,
+        'canPlayback': true,
+        'canManage': false,
+        'viewers': 1,
+        'autoQueue': true,
+        'queue': [
+          {
+            'id': 'q-1',
+            'mediaId': 'media-2',
+            'serverId': 'server-1',
+            'title': 'Blade Runner 2049',
+            'subtitle': 'Sci-Fi',
+          },
+          {'id': 'q-2', 'mediaId': 'media-3', 'serverId': 'server-1', 'title': 'Arrival', 'subtitle': ''},
+        ],
+        'participants': [
+          {'id': 'viewer-1', 'name': 'Viewer', 'role': 'viewer', 'isHost': false, 'present': true},
+        ],
+        'state': {'position': 10.0, 'duration': 6000.0, 'paused': false, 'rate': 1.0},
+      };
+      socket.currentSnapshot = snapshot;
+      await tester.runAsync(() async {
+        provider.handleUburoomSnapshotForTest(snapshot);
+        await pumpEventQueue();
+      });
+
+      await _openSheet(tester, provider);
+
+      // Verify WatchSessionSheet shows media title and queued count in subtitle
+      expect(find.text('Dune'), findsOneWidget);
+      expect(find.text('Part One · 2 queued'), findsOneWidget);
+
+      // Open WatchMediaPage
+      await _tap(tester, find.text('Dune'));
+      expect(find.byType(WatchMediaPage), findsOneWidget);
+
+      // Verify Up Next section
+      expect(find.text('Up Next (2)'), findsOneWidget);
+      expect(find.text('Auto-queue'), findsOneWidget);
+      expect(find.text('Blade Runner 2049'), findsOneWidget);
+      expect(find.text('Sci-Fi'), findsOneWidget);
+      expect(find.text('Arrival'), findsOneWidget);
+    });
+
+    _uburoomTest('tapping Next dispatches media.next and tapping Remove from queue dispatches queue remove', (
+      tester,
+      provider,
+      socket,
+      db,
+      tempDir,
+    ) async {
+      provider.setUburoomSessionForTest(
+        roomId: 'room-ubu-queue-ops',
+        serverUrl: 'http://localhost:6767',
+        token: 'test-token',
+      );
+      final snapshot = {
+        'id': 'room-ubu-queue-ops',
+        'roomName': 'Queue Ops Room',
+        'epoch': 'epoch-ops-1',
+        'revision': 1,
+        'mediaId': 'media-1',
+        'title': 'Dune',
+        'subtitle': 'Part One',
+        'mediaUrl': '/api/watch/media/grant-1/start',
+        'isHost': true,
+        'canPlayback': true,
+        'canManage': true,
+        'viewers': 1,
+        'autoQueue': true,
+        'queue': [
+          {
+            'id': 'q-ops-1',
+            'mediaId': 'media-2',
+            'serverId': 'server-1',
+            'title': 'Blade Runner 2049',
+            'subtitle': 'Sci-Fi',
+          },
+          {'id': 'q-ops-2', 'mediaId': 'media-3', 'serverId': 'server-1', 'title': 'Arrival', 'subtitle': ''},
+        ],
+        'participants': [
+          {'id': 'viewer-host-1', 'name': 'Host', 'role': 'host', 'isHost': true, 'present': true},
+        ],
+        'state': {'position': 10.0, 'duration': 6000.0, 'paused': false, 'rate': 1.0},
+      };
+      socket.currentSnapshot = snapshot;
+      await tester.runAsync(() async {
+        provider.handleUburoomSnapshotForTest(snapshot);
+        await pumpEventQueue();
+      });
+
+      await _openSheet(tester, provider);
+
+      // Open WatchMediaPage
+      await _tap(tester, find.text('Dune'));
+      expect(find.byType(WatchMediaPage), findsOneWidget);
+
+      // Verify Next button is shown and tap it
+      expect(find.text('Next'), findsOneWidget);
+      await _tap(tester, find.text('Next'));
+
+      expect(
+        socket.sentRequests.any(
+          (req) =>
+              req['path'] == '/api/watch/rooms/room-ubu-queue-ops/command' &&
+              (req['data'] as Map?)?['command']?['action'] == 'media.next',
+        ),
+        isTrue,
+        reason: 'tapping Next should dispatch media.next command',
+      );
+
+      // Verify remove buttons exist for queued items and tap the first one
+      final removeButtons = find.byTooltip('Remove from queue');
+      expect(removeButtons, findsNWidgets(2));
+      await _tap(tester, removeButtons.first);
+
+      expect(
+        socket.sentRequests.any(
+          (req) =>
+              req['path'] == '/api/watch/rooms/room-ubu-queue-ops/queue' &&
+              (req['data'] as Map?)?['action'] == 'remove' &&
+              (req['data'] as Map?)?['id'] == 'q-ops-1',
+        ),
+        isTrue,
+        reason: 'tapping Remove from queue should dispatch remove action for item',
+      );
+
+      // Verify tapping Auto-queue toggles auto-queue via socket request
+      await _tap(tester, find.text('Auto-queue'));
+
+      expect(
+        socket.sentRequests.any(
+          (req) =>
+              req['path'] == '/api/watch/rooms/room-ubu-queue-ops/queue' &&
+              (req['data'] as Map?)?['action'] == 'auto' &&
+              (req['data'] as Map?)?['enabled'] == false,
+        ),
+        isTrue,
+        reason: 'tapping Auto-queue should dispatch queue auto action with enabled: false',
+      );
+    });
+  });
+}
+
+class _TestUburoomSocket extends UburoomSocketService {
+  _TestUburoomSocket({required super.clockSync});
+
+  final stateController = StreamController<UburoomRoomStatePush>.broadcast();
+  final connectionController = StreamController<UburoomConnectionState>.broadcast();
+  final _currentState = UburoomConnectionState.connected;
+  final sentRequests = <Map<String, dynamic>>[];
+  Map<String, dynamic> currentSnapshot = {};
+
+  @override
+  void dispose() {
+    stateController.close();
+    connectionController.close();
+    super.dispose();
+  }
+
+  @override
+  bool get isConnected => _currentState == UburoomConnectionState.connected;
+
+  @override
+  UburoomConnectionState get state => _currentState;
+
+  @override
+  Stream<UburoomConnectionState> get connectionStateStream => connectionController.stream;
+
+  @override
+  Stream<UburoomRoomStatePush> get roomStateStream => stateController.stream;
+
+  @override
+  String get serverUrl => 'http://localhost:6767';
+
+  @override
+  String get token => 'test-bearer-token-64hex';
+
+  @override
+  Future<UburoomResponse> sendRequest(String path, [Map<String, dynamic>? data]) async {
+    sentRequests.add({'path': path, 'data': data});
+    if (path.contains('/api/watch/rooms/') && currentSnapshot.isNotEmpty) {
+      return UburoomResponse(id: 1, status: 200, value: currentSnapshot);
+    }
+    return const UburoomResponse(id: 1, status: 200, value: {'ok': true});
+  }
+}
+
+class _FakeAuthService extends UburoomAuthService {
+  @override
+  String get serverUrl => 'http://localhost:6767';
+  @override
+  Future<String?> getToken() async => 'test-bearer-token-64hex';
+}
+
+void _uburoomTest(
+  String description,
+  Future<void> Function(
+    WidgetTester tester,
+    WatchTogetherProvider provider,
+    _TestUburoomSocket socket,
+    AppDatabase database,
+    Directory tempDir,
+  )
+  body,
+) {
+  testWidgets(description, (tester) async {
+    tester.view.physicalSize = const Size(1280, 1000);
+    addTearDown(tester.view.resetPhysicalSize);
+    final tempDir = Directory.systemTemp.createTempSync('plezy_test_');
+    final previousPathProvider = PathProviderPlatform.instance;
+    PathProviderPlatform.instance = FakePathProvider(tempDir);
+    await tester.runAsync(() async {
+      DownloadStorageService.resetForTesting();
+      await DownloadStorageService.instance.initialize(SettingsService.instance);
+    });
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    final clockSync = ClockSync();
+    clockSync.addSample(
+      localSendAt: 1000,
+      serverReceivedAt: 1005,
+      serverSentAt: 1005,
+      localReceiveAt: 1010,
+      serverProcessingMs: 0,
+      clockEpoch: 1,
+    );
+    final socket = _TestUburoomSocket(clockSync: clockSync);
+    final auth = _FakeAuthService();
+    final provider = WatchTogetherProvider(
+      socketService: socket,
+      authService: auth,
+      clockSync: clockSync,
+      viewerId: 'viewer-host-1',
+      database: db,
+    );
+    try {
+      await body(tester, provider, socket, db, tempDir);
+    } finally {
+      await tester.pumpWidget(const SizedBox.shrink());
+      provider.dispose();
+      socket.dispose();
+      await db.close();
+      DownloadStorageService.resetForTesting();
+      PathProviderPlatform.instance = previousPathProvider;
+      try {
+        tempDir.deleteSync(recursive: true);
+      } catch (_) {}
+    }
   });
 }

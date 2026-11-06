@@ -88,19 +88,70 @@ bool isUburoomRoomCode(String code) => _uuidPattern.hasMatch(code) || _hex8Patte
 
 String? normalizeRoomCode(String input) {
   final trimmed = input.trim();
+  if (trimmed.isEmpty) return null;
   final uri = Uri.tryParse(trimmed);
   if (uri != null && (uri.scheme == 'https' || uri.scheme == 'http') && uri.host.isNotEmpty) {
-    final candidates = [...uri.pathSegments.reversed, ?uri.queryParameters['room'], ?uri.queryParameters['roomId']];
-    for (final candidate in candidates) {
-      if (_hex8Pattern.hasMatch(candidate) || (_uuidPattern.firstMatch(candidate)?.group(0) == candidate)) {
-        return candidate.toLowerCase();
+    final fragmentCandidates = <String>[];
+    if (uri.hasFragment) {
+      final fragment = uri.fragment.trim();
+      fragmentCandidates.add(fragment);
+      final queryIndex = fragment.indexOf('?');
+      final queryPart = queryIndex != -1
+          ? fragment.substring(queryIndex + 1)
+          : (fragment.contains('=') ? fragment : null);
+      if (queryPart != null) {
+        try {
+          final queryParams = Uri.splitQueryString(queryPart);
+          if (queryParams['room'] != null) fragmentCandidates.add(queryParams['room']!);
+          if (queryParams['roomId'] != null) fragmentCandidates.add(queryParams['roomId']!);
+        } catch (_) {}
       }
+      for (final segment in fragment.split('/')) {
+        final clean = segment.trim();
+        if (clean.isNotEmpty) fragmentCandidates.add(clean);
+      }
+    }
+
+    final candidates = [
+      ...uri.pathSegments.reversed,
+      ?uri.queryParameters['room'],
+      ?uri.queryParameters['roomId'],
+      ...fragmentCandidates,
+    ];
+
+    for (final candidate in candidates) {
+      final clean = candidate.trim();
+      final uuidMatch = _uuidPattern.firstMatch(clean);
+      if (uuidMatch != null) {
+        return uuidMatch.group(0)!.toLowerCase();
+      }
+      if (_hex8Pattern.hasMatch(clean)) {
+        return clean.toLowerCase();
+      }
+    }
+    final urlUuidMatch = _uuidPattern.firstMatch(trimmed);
+    if (urlUuidMatch != null) {
+      return urlUuidMatch.group(0)!.toLowerCase();
     }
     return null;
   }
   final uuidMatch = _uuidPattern.firstMatch(trimmed);
   if (uuidMatch != null) return uuidMatch.group(0)!.toLowerCase();
   if (_hex8Pattern.hasMatch(trimmed)) return trimmed.toLowerCase();
+
+  if (trimmed.startsWith('#') || trimmed.startsWith('?')) {
+    final stripped = trimmed.substring(1).trim();
+    if (_hex8Pattern.hasMatch(stripped)) return stripped.toLowerCase();
+    try {
+      final queryPart = stripped.contains('?') ? stripped.split('?').last : stripped;
+      final parsed = Uri.splitQueryString(queryPart);
+      final roomVal = parsed['room'] ?? parsed['roomId'];
+      if (roomVal != null && _hex8Pattern.hasMatch(roomVal.trim())) {
+        return roomVal.trim().toLowerCase();
+      }
+    } catch (_) {}
+  }
+
   try {
     return owp.formatCode(trimmed).replaceAll('-', '');
   } on owp.PartyException {

@@ -40,8 +40,16 @@ extension _VideoPlayerWatchTogetherMethods on VideoPlayerScreenState {
   /// Without control of a room that drives this player, presses do nothing.
   bool _canControlPlayback() => !_shuttingDown && (_followedRoom()?.canControl ?? true);
 
-  /// Another item replaces the room's media for everyone: host only.
-  bool _canNavigateMediaItems() => !_shuttingDown && (_followedRoom()?.isHost ?? true);
+  /// Another item replaces the room's media for everyone: host only, or any
+  /// controller in an uburoom session.
+  bool _canNavigateMediaItems() {
+    if (_shuttingDown) return false;
+    final room = _followedRoom();
+    if (room?.isUburoomSession == true) {
+      return room!.canControl;
+    }
+    return room?.isHost ?? true;
+  }
 
   /// Registers this screen as the player the room switches and closes.
   void _registerWithWatchTogether() {
@@ -71,11 +79,15 @@ extension _VideoPlayerWatchTogetherMethods on VideoPlayerScreenState {
         : versions.where((v) => sourceId != null && v.id == sourceId).firstOrNull;
     final opened = WatchCopy.of(metadata, version);
     final roomRef = _watchTogetherProvider?.roomCopy?.ref;
-    if (roomRef != null &&
-        roomRef.serverId == opened.serverId &&
-        roomRef.itemId == opened.itemId &&
-        (roomRef.versionId.isEmpty || opened.versionId.isEmpty)) {
-      return roomRef;
+    if (roomRef != null) {
+      if (_watchTogetherProvider?.isUburoomSession == true && roomRef.itemId == opened.itemId) {
+        return roomRef;
+      }
+      if (roomRef.serverId == opened.serverId &&
+          roomRef.itemId == opened.itemId &&
+          (roomRef.versionId.isEmpty || opened.versionId.isEmpty)) {
+        return roomRef;
+      }
     }
     return opened;
   }
@@ -167,6 +179,9 @@ extension _VideoPlayerWatchTogetherMethods on VideoPlayerScreenState {
     _wtAdapter = null;
     _wtRoomOpen = false;
     if (watchTogether == null || adapter == null) return;
+    if (watchTogether.isUburoomSession && watchTogether.uburoomState?.directDelivery == true) {
+      unawaited(watchTogether.reportUburoomDeliveryFailure());
+    }
     _wtReleased = watchTogether.playerClosed(adapter, continuing: true);
   }
 

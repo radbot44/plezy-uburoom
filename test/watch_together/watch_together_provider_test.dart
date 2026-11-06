@@ -21,6 +21,8 @@ import 'package:plezy/watch_together/providers/watch_together_provider.dart';
 import 'package:plezy/watch_together/services/library_resolver.dart';
 import 'package:plezy/watch_together/services/player_adapter.dart';
 import 'package:plezy/watch_together/services/recent_rooms_service.dart';
+import 'package:plezy/watch_together/services/uburoom_auth_service.dart';
+import 'package:plezy/watch_together/services/uburoom_socket_service.dart';
 import 'package:plezy/watch_together/services/watch_party_relays.dart';
 
 import '../test_helpers/fake_owp_relay.dart';
@@ -28,6 +30,56 @@ import '../test_helpers/library_lookup.dart';
 import '../test_helpers/media_items.dart';
 import '../test_helpers/prefs.dart';
 import '../test_helpers/watch_together_fakes.dart';
+
+class _UburoomAuth extends UburoomAuthService {
+  @override
+  String get serverUrl => 'https://watch.example';
+
+  @override
+  Future<String?> getToken() async => 'fixture-token-64hex';
+}
+
+class _UburoomSocket extends UburoomSocketService {
+  final requests = <Map<String, dynamic>>[];
+  final statePushController = StreamController<UburoomRoomStatePush>.broadcast();
+  final connController = StreamController<UburoomConnectionState>.broadcast();
+  final UburoomConnectionState _connState = UburoomConnectionState.connected;
+  UburoomResponse Function(String path, Map<String, dynamic>? data)? onSend;
+
+  @override
+  bool get isConnected => _connState == UburoomConnectionState.connected;
+
+  @override
+  UburoomConnectionState get state => _connState;
+
+  @override
+  String get serverUrl => 'https://watch.example';
+
+  @override
+  String get token => 'fixture-token-64hex';
+
+  @override
+  Stream<UburoomRoomStatePush> get roomStateStream => statePushController.stream;
+
+  @override
+  Stream<UburoomConnectionState> get connectionStateStream => connController.stream;
+
+  @override
+  Future<UburoomResponse> sendRequest(String path, [Map<String, dynamic>? data]) async {
+    requests.add({'path': path, 'data': data});
+    if (onSend != null) {
+      return onSend!(path, data);
+    }
+    return const UburoomResponse(id: 1, status: 200, value: {'ok': true});
+  }
+
+  @override
+  void dispose() {
+    statePushController.close();
+    connController.close();
+    super.dispose();
+  }
+}
 
 /// One server of a user, answering the descriptor's ID lookups.
 class _Server implements MediaServerClient {
@@ -816,6 +868,295 @@ void main() {
       expect(screen.players.single.adapter.copy, _copyOf(_guestAlien));
       expect(g.provider.canJoinPlayback, isFalse);
     });
+  });
+
+  group('uburoom provider extensions', () {
+    late _UburoomAuth auth;
+    late _UburoomSocket socket;
+    late WatchTogetherProvider provider;
+
+    setUp(() {
+      auth = _UburoomAuth();
+      socket = _UburoomSocket();
+      provider = WatchTogetherProvider(socketService: socket, authService: auth);
+    });
+
+    tearDown(() => provider.dispose());
+
+    test('resolves directHls map and subtitleUrl into roomCopy item raw', () async {
+      provider.setUburoomSessionForTest(
+        roomId: '11111111-2222-3333-4444-555555555555',
+        serverUrl: 'https://watch.example',
+        token: 'fixture-token-64hex',
+      );
+
+      await provider.handleUburoomSnapshotAsyncForTest({
+        'id': '11111111-2222-3333-4444-555555555555',
+        'epoch': 'epoch-101',
+        'revision': 1,
+        'mediaId': 'plex-item-99',
+        'title': 'Test Movie',
+        'format': 'hls',
+        'directDelivery': false,
+        'directHls': {'url': '/api/watch/hls/master.m3u8', 'session': 's1'},
+        'subtitleUrl': '/api/watch/media/token/captions-1',
+      });
+
+      expect(provider.roomCopy, isNotNull);
+      final raw = provider.roomCopy!.ref.item!.raw!;
+      expect(raw['uburoomMediaUrl'], 'https://watch.example/api/watch/hls/master.m3u8');
+      expect(raw['uburoomHeaders'], {'Authorization': 'Bearer fixture-token-64hex'});
+      expect(raw['uburoomIsTranscoding'], isTrue);
+      expect(raw['uburoomSubtitleUrl'], 'https://watch.example/api/watch/media/token/captions-1');
+    });
+
+    test('directDelivery: true sets uburoomIsTranscoding to false', () async {
+      provider.setUburoomSessionForTest(
+        roomId: '11111111-2222-3333-4444-555555555555',
+        serverUrl: 'https://watch.example',
+        token: 'fixture-token-64hex',
+      );
+
+      await provider.handleUburoomSnapshotAsyncForTest({
+        'id': '11111111-2222-3333-4444-555555555555',
+        'epoch': 'epoch-102',
+        'revision': 1,
+        'mediaId': 'plex-item-100',
+        'title': 'Direct Movie',
+        'format': 'hls',
+        'directDelivery': true,
+        'directHls': 'https://direct.example/stream.m3u8',
+      });
+
+      expect(provider.roomCopy, isNotNull);
+      final raw = provider.roomCopy!.ref.item!.raw!;
+      expect(raw['uburoomMediaUrl'], 'https://direct.example/stream.m3u8');
+      expect(raw['uburoomIsTranscoding'], isFalse);
+      expect(raw.containsKey('uburoomSubtitleUrl'), isFalse);
+    });
+
+    test('skipToNextInUburoom dispatches media.next when in session and can control', () async {
+      provider.setUburoomSessionForTest(
+        roomId: '11111111-2222-3333-4444-555555555555',
+        serverUrl: 'https://watch.example',
+        token: 'fixture-token-64hex',
+      );
+
+      // Without canControl / snapshot, nothing is sent
+      await provider.skipToNextInUburoom();
+      expect(socket.requests, isEmpty);
+
+      // Snapshot with canPlayback: true
+      await provider.handleUburoomSnapshotAsyncForTest({
+        'id': '11111111-2222-3333-4444-555555555555',
+        'epoch': 'epoch-103',
+        'canPlayback': true,
+      });
+
+      expect(provider.canControl, isTrue);
+      await provider.skipToNextInUburoom();
+
+      expect(socket.requests, hasLength(1));
+      expect(socket.requests.single['path'], '/api/watch/rooms/11111111-2222-3333-4444-555555555555/command');
+      final cmd = socket.requests.single['data'] as Map<String, dynamic>;
+      expect(cmd['command']['action'], 'media.next');
+    });
+
+    test('removeFromUburoomQueue sends remove queue request', () async {
+      provider.setUburoomSessionForTest(
+        roomId: '11111111-2222-3333-4444-555555555555',
+        serverUrl: 'https://watch.example',
+        token: 'fixture-token-64hex',
+      );
+
+      await provider.removeFromUburoomQueue('queue-item-42');
+
+      expect(socket.requests, hasLength(1));
+      expect(socket.requests.single['path'], '/api/watch/rooms/11111111-2222-3333-4444-555555555555/queue');
+      expect(socket.requests.single['data'], {'action': 'remove', 'id': 'queue-item-42'});
+    });
+
+    test('setUburoomAutoQueue sends auto queue request', () async {
+      provider.setUburoomSessionForTest(
+        roomId: '11111111-2222-3333-4444-555555555555',
+        serverUrl: 'https://watch.example',
+        token: 'fixture-token-64hex',
+      );
+
+      await provider.setUburoomAutoQueue(true);
+      expect(socket.requests.last['path'], '/api/watch/rooms/11111111-2222-3333-4444-555555555555/queue');
+      expect(socket.requests.last['data'], {'action': 'auto', 'enabled': true});
+
+      await provider.setUburoomAutoQueue(false);
+      expect(socket.requests.last['data'], {'action': 'auto', 'enabled': false});
+    });
+
+    test('reportUburoomDeliveryFailure reports failure and updates room snapshot', () async {
+      provider.setUburoomSessionForTest(
+        roomId: '11111111-2222-3333-4444-555555555555',
+        serverUrl: 'https://watch.example',
+        token: 'fixture-token-64hex',
+      );
+
+      // When directDelivery is false or null, reportUburoomDeliveryFailure does nothing
+      await provider.reportUburoomDeliveryFailure();
+      expect(socket.requests, isEmpty);
+
+      // Snapshot with directDelivery: true
+      await provider.handleUburoomSnapshotAsyncForTest({
+        'id': '11111111-2222-3333-4444-555555555555',
+        'epoch': 'epoch-104',
+        'mediaId': 'plex-item-55',
+        'title': 'High Res Video',
+        'directDelivery': true,
+        'mediaVersion': 'mv-direct-1',
+        'streamVersion': 'sv-direct-1',
+        'directHls': 'https://direct.example/stream.m3u8',
+      });
+
+      socket.requests.clear();
+
+      socket.onSend = (path, data) {
+        if (path == '/api/watch/rooms/11111111-2222-3333-4444-555555555555/delivery') {
+          return const UburoomResponse(
+            id: 2,
+            status: 200,
+            value: {
+              'id': '11111111-2222-3333-4444-555555555555',
+              'epoch': 'epoch-104',
+              'mediaId': 'plex-item-55',
+              'title': 'High Res Video (Fallback Transcode)',
+              'directDelivery': false,
+              'format': 'hls',
+              'mediaUrl': '/api/watch/media/fallback-grant/start',
+            },
+          );
+        }
+        return const UburoomResponse(id: 1, status: 200, value: {'ok': true});
+      };
+
+      await provider.reportUburoomDeliveryFailure();
+
+      expect(socket.requests, hasLength(1));
+      expect(socket.requests.single['path'], '/api/watch/rooms/11111111-2222-3333-4444-555555555555/delivery');
+      final payload = socket.requests.single['data'] as Map<String, dynamic>;
+      expect(payload['viewerId'], provider.myPeerId);
+      expect(payload['mediaVersion'], 'mv-direct-1');
+      expect(payload['streamVersion'], 'sv-direct-1');
+
+      // The new snapshot was processed
+      expect(provider.uburoomState?.directDelivery, isFalse);
+      expect(provider.roomCopy, isNotNull);
+      final raw = provider.roomCopy!.ref.item!.raw!;
+      expect(raw['uburoomMediaUrl'], 'https://watch.example/api/watch/media/fallback-grant/start');
+      expect(raw['uburoomIsTranscoding'], isTrue);
+    });
+
+    test('setUburoomQuality updates uburoomQuality and re-requests room snapshot with quality param', () async {
+      expect(provider.uburoomQuality, 'direct');
+
+      // Changing quality outside session updates getter without sending requests
+      await provider.setUburoomQuality('720p-2mbps');
+      expect(provider.uburoomQuality, '720p-2mbps');
+      expect(socket.requests, isEmpty);
+
+      // Now join a session
+      provider.setUburoomSessionForTest(
+        roomId: '11111111-2222-3333-4444-555555555555',
+        serverUrl: 'https://watch.example',
+        token: 'fixture-token-64hex',
+      );
+
+      socket.onSend = (path, data) {
+        if (path.startsWith('/api/watch/rooms/11111111-2222-3333-4444-555555555555?')) {
+          return const UburoomResponse(
+            id: 2,
+            status: 200,
+            value: {
+              'id': '11111111-2222-3333-4444-555555555555',
+              'epoch': 'epoch-106',
+              'mediaId': 'plex-item-88',
+              'title': 'Quality Test Movie',
+              'format': 'hls',
+              'mediaUrl': '/api/watch/media/token-1080p/start',
+            },
+          );
+        }
+        return const UburoomResponse(id: 1, status: 200, value: {'ok': true});
+      };
+
+      await provider.setUburoomQuality('1080p-10mbps');
+      expect(provider.uburoomQuality, '1080p-10mbps');
+
+      expect(socket.requests, hasLength(1));
+      expect(
+        socket.requests.single['path'],
+        '/api/watch/rooms/11111111-2222-3333-4444-555555555555?viewer=${provider.viewerId}&quality=1080p-10mbps&delivery=auto',
+      );
+      expect(provider.roomCopy, isNotNull);
+      final raw = provider.roomCopy!.ref.item!.raw!;
+      expect(raw['uburoomMediaUrl'], 'https://watch.example/api/watch/media/token-1080p/start');
+    });
+
+    test(
+      'kickUburoomParticipant and setUburoomParticipantRole send expected requests when host or canManage',
+      () async {
+        provider.setUburoomSessionForTest(
+          roomId: '11111111-2222-3333-4444-555555555555',
+          serverUrl: 'https://watch.example',
+          token: 'fixture-token-64hex',
+        );
+
+        // 1. Unauthorized: normal viewer (isHost: false, canManage: false) -> no-ops
+        await provider.handleUburoomSnapshotAsyncForTest({
+          'id': '11111111-2222-3333-4444-555555555555',
+          'isHost': false,
+          'canManage': false,
+        });
+
+        await provider.kickUburoomParticipant('target-user-1');
+        await provider.setUburoomParticipantRole('target-user-1', 'moderator');
+        expect(socket.requests, isEmpty);
+
+        // 2. Authorized via isHost: true
+        await provider.handleUburoomSnapshotAsyncForTest({
+          'id': '11111111-2222-3333-4444-555555555555',
+          'isHost': true,
+          'canManage': false,
+        });
+        expect(provider.isHost, isTrue);
+
+        await provider.kickUburoomParticipant('target-user-1');
+        expect(socket.requests, hasLength(1));
+        expect(socket.requests.last['path'], '/api/watch/rooms/11111111-2222-3333-4444-555555555555/people');
+        expect(socket.requests.last['data'], {'action': 'kick', 'userId': 'target-user-1'});
+
+        await provider.setUburoomParticipantRole('target-user-2', 'host');
+        expect(socket.requests, hasLength(2));
+        expect(socket.requests.last['path'], '/api/watch/rooms/11111111-2222-3333-4444-555555555555/people');
+        expect(socket.requests.last['data'], {'action': 'role', 'userId': 'target-user-2', 'role': 'host'});
+
+        // 3. Authorized via canManage: true (when isHost: false)
+        socket.requests.clear();
+        await provider.handleUburoomSnapshotAsyncForTest({
+          'id': '11111111-2222-3333-4444-555555555555',
+          'isHost': false,
+          'canManage': true,
+        });
+        expect(provider.isHost, isFalse);
+        expect(provider.uburoomState?.canManage, isTrue);
+
+        await provider.kickUburoomParticipant('target-user-3');
+        expect(socket.requests, hasLength(1));
+        expect(socket.requests.last['path'], '/api/watch/rooms/11111111-2222-3333-4444-555555555555/people');
+        expect(socket.requests.last['data'], {'action': 'kick', 'userId': 'target-user-3'});
+
+        await provider.setUburoomParticipantRole('target-user-3', 'viewer');
+        expect(socket.requests, hasLength(2));
+        expect(socket.requests.last['path'], '/api/watch/rooms/11111111-2222-3333-4444-555555555555/people');
+        expect(socket.requests.last['data'], {'action': 'role', 'userId': 'target-user-3', 'role': 'viewer'});
+      },
+    );
   });
 
   group('on a real relay', skip: _relayBinary == null ? 'OWP_RELAY_BIN is not set' : false, () {

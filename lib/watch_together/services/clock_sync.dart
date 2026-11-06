@@ -67,6 +67,7 @@ class ClockSync {
   double get uncertaintyMs => _uncertaintyMs;
   dynamic get clockEpoch => _currentEpoch;
   int get sampleCount => _samples.length;
+  double? get minRttMs => _samples.isEmpty ? null : _samples.map((s) => s.rttMs).reduce(math.min);
   int? get lastSampleReceivedAt => _lastWallReceiveAt;
 
   /// Age in milliseconds of the most recent clock sample relative to [nowMs].
@@ -96,9 +97,13 @@ class ClockSync {
     required dynamic clockEpoch,
   }) {
     final currentMono = monotonicNowMs != null ? monotonicNowMs!() : _monotonicSw.elapsedMilliseconds;
+    final candidateOffset = ((serverReceivedAt - localSendAt) + (serverSentAt - localReceiveAt)) / 2.0;
 
     // If the server reported an epoch restart or change, invalidate earlier samples.
     if (_currentEpoch != null && _currentEpoch != clockEpoch) {
+      reset();
+    } else if (_samples.isNotEmpty && (candidateOffset - _filteredOffsetMs).abs() > 5000.0) {
+      // Local system wall-clock step/discontinuity (>5000ms): clear old stale samples so it snaps immediately.
       reset();
     } else if (_lastWallReceiveAt != null && _lastMonotonicReceiveAt != null) {
       // Detect local OS wall-clock jump using monotonic clock reference.
@@ -109,7 +114,6 @@ class ClockSync {
       }
     } else if (_samples.isNotEmpty) {
       // Also detect extreme offset step (>2000ms) after already synchronized on low-RTT samples.
-      final candidateOffset = ((serverReceivedAt - localSendAt) + (serverSentAt - localReceiveAt)) / 2.0;
       final candidateRtt = math.max(0.0, (localReceiveAt - localSendAt).toDouble() - serverProcessingMs);
       if (isSynchronized &&
           candidateRtt <= (_lastRttMs + 100.0) &&

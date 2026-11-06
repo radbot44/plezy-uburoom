@@ -33,8 +33,13 @@ class WatchSessionSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<WatchTogetherProvider>();
-    final code = provider.formattedRoomCode ?? '';
+    final code = (provider.isUburoomSession ? provider.roomCode : provider.formattedRoomCode) ?? '';
+    final roomName = provider.uburoomState?.roomName;
+    final roomHeaderTitle = (provider.isUburoomSession && roomName != null && roomName.isNotEmpty) ? roomName : code;
     final media = provider.media;
+    final mediaTitle = provider.isUburoomSession
+        ? (provider.uburoomState?.hasMedia == true ? provider.uburoomState!.title : t.watchTogether.nothingPlaying)
+        : (media == null ? t.watchTogether.nothingPlaying : watchMediaTitle(media));
     final status = provider.isReconnecting
         ? t.watchTogether.reconnecting
         : provider.isConnected
@@ -47,8 +52,11 @@ class WatchSessionSheet extends StatelessWidget {
         FocusableListTile(
           leading: const AppIcon(Symbols.tag_rounded, fill: 1),
           title: Text(
-            code,
-            style: const TextStyle(fontFamily: 'monospace', fontWeight: FontWeight.bold),
+            roomHeaderTitle,
+            style: TextStyle(
+              fontFamily: (provider.isUburoomSession && roomName != null && roomName.isNotEmpty) ? null : 'monospace',
+              fontWeight: FontWeight.bold,
+            ),
           ),
           subtitle: Text([status, t.watchTogether.participantCount(n: provider.participantCount)].join(' · ')),
           trailing: const AppIcon(Symbols.content_copy_rounded, fill: 1),
@@ -57,7 +65,7 @@ class WatchSessionSheet extends StatelessWidget {
         const Padding(padding: EdgeInsets.symmetric(horizontal: 16), child: WatchReconnectingBanner()),
         FocusableListTile(
           leading: const AppIcon(Symbols.movie_rounded, fill: 1),
-          title: Text(media == null ? t.watchTogether.nothingPlaying : watchMediaTitle(media)),
+          title: Text(mediaTitle),
           subtitle: switch (watchMatchSummary(provider)) {
             final summary? => Text(summary),
             null => null,
@@ -70,7 +78,7 @@ class WatchSessionSheet extends StatelessWidget {
             leading: const AppIcon(Symbols.play_arrow_rounded, fill: 1),
             title: Text(t.watchTogether.joinCurrentPlayback),
             subtitle: Text(t.watchTogether.joinCurrentPlaybackDescription),
-            onTap: () => unawaited(provider.openRoomCopy()),
+            onTap: () => unawaited(provider.isUburoomSession ? provider.joinPlayback() : provider.openRoomCopy()),
           ),
         FocusableListTile(
           leading: const AppIcon(Symbols.group_rounded, fill: 1),
@@ -79,14 +87,15 @@ class WatchSessionSheet extends StatelessWidget {
           trailing: const AppIcon(Symbols.chevron_right_rounded, fill: 1),
           onTap: () => unawaited(showWatchPage<void>(context, (nested) => WatchParticipantsPage(nested: nested))),
         ),
-        FocusableListTile(
-          leading: const AppIcon(Symbols.av_timer_rounded, fill: 1),
-          title: Text(t.watchTogether.syncOffset),
-          subtitle: Text(watchOffsetText(provider.state.offsetMs)),
-          trailing: const AppIcon(Symbols.chevron_right_rounded, fill: 1),
-          onTap: () => unawaited(showWatchPage<void>(context, (nested) => WatchOffsetPage(nested: nested))),
-        ),
-        const WatchHostSettingsSection(),
+        if (!provider.isUburoomSession)
+          FocusableListTile(
+            leading: const AppIcon(Symbols.av_timer_rounded, fill: 1),
+            title: Text(t.watchTogether.syncOffset),
+            subtitle: Text(watchOffsetText(provider.state.offsetMs)),
+            trailing: const AppIcon(Symbols.chevron_right_rounded, fill: 1),
+            onTap: () => unawaited(showWatchPage<void>(context, (nested) => WatchOffsetPage(nested: nested))),
+          ),
+        if (!provider.isUburoomSession) const WatchHostSettingsSection(),
         FocusableListTile(
           leading: const AppIcon(Symbols.logout_rounded, fill: 1),
           title: Text(t.watchTogether.leaveRoom),
@@ -176,6 +185,7 @@ class _WatchMismatchPromptState extends State<WatchMismatchPrompt> {
 /// The mismatch the player asks about, once per media epoch and offered file;
 /// null when there is none to ask about (none, or the host's own media).
 String? watchMismatchPromptKey(WatchTogetherProvider provider) {
+  if (provider.isUburoomSession) return null;
   final mismatch = provider.state.mismatch;
   if (!provider.isConnected || mismatch == null) return null;
   final copy = provider.roomCopy;

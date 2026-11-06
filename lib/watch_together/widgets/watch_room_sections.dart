@@ -196,7 +196,9 @@ class WatchRoomHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<WatchTogetherProvider>();
-    final code = provider.formattedRoomCode ?? '';
+    final code = (provider.isUburoomSession ? provider.roomCode : provider.formattedRoomCode) ?? '';
+    final roomName = provider.uburoomState?.roomName;
+    final displayCode = (provider.isUburoomSession && roomName != null && roomName.isNotEmpty) ? roomName : code;
     final theme = Theme.of(context);
     final hostName = provider.host?.name;
     return Column(
@@ -205,11 +207,11 @@ class WatchRoomHeader extends StatelessWidget {
         Text(t.watchTogether.roomCode, style: _muted(context, theme.textTheme.labelLarge)),
         const SizedBox(height: 4),
         Text(
-          code,
+          displayCode,
           style: theme.textTheme.displaySmall?.copyWith(
-            fontFamily: 'monospace',
+            fontFamily: provider.isUburoomSession && roomName != null && roomName.isNotEmpty ? null : 'monospace',
             fontWeight: FontWeight.bold,
-            letterSpacing: 4,
+            letterSpacing: provider.isUburoomSession && roomName != null && roomName.isNotEmpty ? 1 : 4,
           ),
         ),
         const SizedBox(height: 12),
@@ -313,8 +315,181 @@ class WatchMediaSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<WatchTogetherProvider>();
-    final media = provider.media;
     final theme = Theme.of(context);
+
+    if (provider.isUburoomSession) {
+      final ubState = provider.uburoomState;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(t.watchTogether.nowPlaying, style: _muted(context, theme.textTheme.labelLarge)),
+          const SizedBox(height: 4),
+          if (ubState == null || !ubState.hasMedia) ...[
+            Text(t.watchTogether.nothingPlaying, style: theme.textTheme.titleMedium),
+            Text(
+              provider.isHost ? t.watchTogether.nothingPlayingHost : t.watchTogether.nothingPlayingGuest,
+              style: _muted(context, theme.textTheme.bodySmall),
+            ),
+          ] else ...[
+            Text(ubState.title, style: theme.textTheme.titleMedium),
+            if (ubState.subtitle.isNotEmpty) ...[
+              const SizedBox(height: 2),
+              Text(ubState.subtitle, style: _muted(context, theme.textTheme.bodySmall)),
+            ],
+            const SizedBox(height: 8),
+            _InfoNote(
+              icon: ubState.deliveryMode == 'local' ? Symbols.file_download_done_rounded : Symbols.cloud_sync_rounded,
+              text: ubState.deliveryMode == 'local' ? 'Playing downloaded local file' : 'Streaming from uburoom',
+            ),
+            if (provider.canJoinPlayback) ...[
+              const SizedBox(height: 16),
+              Text(t.watchTogether.joinCurrentPlaybackDescription, style: _muted(context, theme.textTheme.bodySmall)),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: WatchButton(
+                  label: t.watchTogether.joinCurrentPlayback,
+                  icon: Symbols.play_arrow_rounded,
+                  style: WatchButtonStyle.filled,
+                  onPressed: () => unawaited(provider.joinPlayback()),
+                ),
+              ),
+            ],
+            if (ubState.canPlayback || provider.isHost) ...[
+              const SizedBox(height: 12),
+              WatchButtonRow(
+                children: [
+                  if (ubState.canPlayback)
+                    WatchButton(
+                      label: ubState.paused ? t.common.play : t.common.pause,
+                      icon: ubState.paused ? Symbols.play_arrow_rounded : Symbols.pause_rounded,
+                      onPressed: () {
+                        if (ubState.paused) {
+                          provider.play();
+                        } else {
+                          provider.pause();
+                        }
+                      },
+                    ),
+                  if (ubState.canPlayback && ubState.queue.isNotEmpty)
+                    WatchButton(
+                      label: 'Next',
+                      icon: Symbols.skip_next_rounded,
+                      onPressed: () => unawaited(provider.skipToNextInUburoom()),
+                    ),
+                  if (provider.isHost)
+                    WatchButton(
+                      label: t.watchTogether.stopMedia,
+                      icon: Symbols.stop_rounded,
+                      onPressed: provider.stopMedia,
+                    ),
+                ],
+              ),
+            ],
+          ],
+          if (ubState != null && ubState.queue.isNotEmpty) ...[
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                Expanded(
+                  child: Text('Up Next (${ubState.queue.length})', style: _muted(context, theme.textTheme.labelLarge)),
+                ),
+                if (ubState.canPlayback || provider.isHost) ...[
+                  if (ubState.durable || ubState.autoQueue)
+                    FocusableButton(
+                      onPressed: () => unawaited(provider.setUburoomAutoQueue(!ubState.autoQueue)),
+                      child: Material(
+                        color: ubState.autoQueue ? theme.colorScheme.secondaryContainer : Colors.transparent,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: const BorderRadius.all(Radius.circular(4)),
+                          side: ubState.autoQueue
+                              ? BorderSide.none
+                              : BorderSide(color: theme.colorScheme.outlineVariant),
+                        ),
+                        child: InkWell(
+                          borderRadius: const BorderRadius.all(Radius.circular(4)),
+                          onTap: () => unawaited(provider.setUburoomAutoQueue(!ubState.autoQueue)),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                AppIcon(
+                                  Symbols.autorenew_rounded,
+                                  size: 16,
+                                  color: ubState.autoQueue
+                                      ? theme.colorScheme.onSecondaryContainer
+                                      : theme.colorScheme.onSurfaceVariant,
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  'Auto-queue',
+                                  style: theme.textTheme.labelSmall?.copyWith(
+                                    color: ubState.autoQueue
+                                        ? theme.colorScheme.onSecondaryContainer
+                                        : theme.colorScheme.onSurfaceVariant,
+                                    fontWeight: ubState.autoQueue ? FontWeight.bold : FontWeight.normal,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ] else if (ubState.autoQueue) ...[
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      AppIcon(Symbols.autorenew_rounded, size: 16, color: theme.colorScheme.onSurfaceVariant),
+                      const SizedBox(width: 4),
+                      Text('Auto-queue', style: _muted(context, theme.textTheme.bodySmall)),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+            const SizedBox(height: 8),
+            for (final item in ubState.queue) ...[
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: AppIcon(
+                        Symbols.playlist_play_rounded,
+                        size: 20,
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(item.title, style: theme.textTheme.bodyMedium),
+                          if (item.subtitle.isNotEmpty)
+                            Text(item.subtitle, style: _muted(context, theme.textTheme.bodySmall)),
+                        ],
+                      ),
+                    ),
+                    if (ubState.canPlayback || provider.isHost)
+                      IconButton(
+                        icon: const AppIcon(Symbols.close_rounded, size: 18),
+                        tooltip: 'Remove from queue',
+                        onPressed: () => unawaited(provider.removeFromUburoomQueue(item.id)),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ],
+        ],
+      );
+    }
+
+    final media = provider.media;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -388,6 +563,24 @@ class _InfoNote extends StatelessWidget {
 /// One line describing this user's match, for a summary row; null without
 /// media.
 String? watchMatchSummary(WatchTogetherProvider provider) {
+  if (provider.isUburoomSession) {
+    final ubState = provider.uburoomState;
+    if (ubState == null) return null;
+    final queueCount = ubState.queue.length;
+    final queueSuffix = queueCount > 0 ? ' · $queueCount queued' : '';
+    if (!ubState.hasMedia) {
+      return queueCount > 0 ? '$queueCount queued' : null;
+    }
+    final isLocal = ubState.deliveryMode == 'local';
+    final hasSubtitle = ubState.subtitle.isNotEmpty;
+    if (isLocal) {
+      return (hasSubtitle ? '${ubState.subtitle} · Local file' : 'Local file') + queueSuffix;
+    } else if (hasSubtitle) {
+      return '${ubState.subtitle}$queueSuffix';
+    } else {
+      return 'Synced with uburoom$queueSuffix';
+    }
+  }
   if (!provider.hasMedia) return null;
   final state = provider.state;
   final copy = provider.roomCopy;
@@ -411,7 +604,7 @@ class WatchMatchSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<WatchTogetherProvider>();
-    if (!provider.hasMedia) return const SizedBox.shrink();
+    if (!provider.hasMedia || provider.isUburoomSession) return const SizedBox.shrink();
     final state = provider.state;
     final copy = provider.roomCopy;
     if (copy != null && copy.id.isEmpty) {
@@ -714,15 +907,32 @@ class WatchParticipantTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final provider = context.watch<WatchTogetherProvider>();
     final me = participant.peerId == provider.myPeerId;
-    final canManage = provider.isHost && !me;
-    final match = participant.match;
-    final details = [
-      watchClientApp(participant.client),
-      participant.connected ? t.watchTogether.connected : t.watchTogether.disconnected,
-      if (participant.connected) watchPlayerStateText(participant.player),
-      if (match != null) watchMatchStateText(match.state),
-      if (participant.offsetMs != 0) t.watchTogether.participantOffset(offset: watchOffsetText(participant.offsetMs)),
-    ].join(' · ');
+    final canManage = !provider.isUburoomSession && provider.isHost && !me;
+    final String details;
+    if (provider.isUburoomSession) {
+      final ubParticipant = provider.uburoomParticipants.where((p) => p.id == participant.peerId).firstOrNull;
+      final parts = <String>[
+        watchClientApp(participant.client),
+        participant.connected ? t.watchTogether.connected : t.watchTogether.disconnected,
+        if (ubParticipant?.syncLevel != null && ubParticipant!.syncLevel!.isNotEmpty)
+          'Sync: ${ubParticipant.syncLevel}',
+        if (ubParticipant?.syncStatus != null &&
+            ubParticipant!.syncStatus!.isNotEmpty &&
+            ubParticipant.syncStatus != 'playing' &&
+            ubParticipant.syncStatus != 'known')
+          ubParticipant.syncStatus!,
+      ];
+      details = parts.join(' · ');
+    } else {
+      final match = participant.match;
+      details = [
+        watchClientApp(participant.client),
+        participant.connected ? t.watchTogether.connected : t.watchTogether.disconnected,
+        if (participant.connected) watchPlayerStateText(participant.player),
+        if (match != null) watchMatchStateText(match.state),
+        if (participant.offsetMs != 0) t.watchTogether.participantOffset(offset: watchOffsetText(participant.offsetMs)),
+      ].join(' · ');
+    }
     return FocusableListTile(
       leading: AppIcon(participant.connected ? Symbols.person_rounded : Symbols.person_off_rounded, fill: 1),
       title: Row(
@@ -775,7 +985,8 @@ class WatchParticipantActionsPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final provider = context.watch<WatchTogetherProvider>();
     final participant = provider.participants.where((p) => p.peerId == peerId).firstOrNull;
-    final canManage = participant != null && provider.isHost && peerId != provider.myPeerId;
+    final canManage =
+        !provider.isUburoomSession && participant != null && provider.isHost && peerId != provider.myPeerId;
     return WatchSheetPage(
       title: participant?.name ?? t.watchTogether.participants,
       nested: nested,

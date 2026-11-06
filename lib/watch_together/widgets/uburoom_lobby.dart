@@ -129,7 +129,7 @@ class _UburoomLobbyState extends State<UburoomLobby> {
           Card(
             child: ListTile(
               title: Text(room['name']?.toString() ?? 'Unnamed room'),
-              subtitle: Text('${room['active'] == false ? 'Saved room' : 'Active room'} · ${room['id']}'),
+              subtitle: Text(_formatRoomSubtitle(room)),
               trailing: Text(room['active'] == false ? 'Reopen' : 'Join'),
               enabled: !disabled,
               onTap: disabled ? null : () => _run(() => provider.openUburoomRoom(room)),
@@ -137,5 +137,22 @@ class _UburoomLobbyState extends State<UburoomLobby> {
           ),
       ],
     );
+  }
+
+  static String _formatRoomSubtitle(Map<String, dynamic> room) {
+    final status = room['active'] == false ? 'Saved room' : 'Active room';
+    final isPrivate = room['visibility'] == 'private';
+    final viewersRaw = room['viewers'];
+    final viewers = (viewersRaw is int && viewersRaw > 0)
+        ? '$viewersRaw watching'
+        : (viewersRaw is num && viewersRaw.toInt() > 0)
+        ? '${viewersRaw.toInt()} watching'
+        : null;
+    final titleRaw = room['title'];
+    final title = (titleRaw is String && titleRaw.trim().isNotEmpty) ? titleRaw.trim() : null;
+    final id = room['id']?.toString();
+
+    final parts = <String>[status, if (isPrivate) 'Private', ?viewers, ?title, if (id != null && id.isNotEmpty) id];
+    return parts.join(' · ');
   }
 }

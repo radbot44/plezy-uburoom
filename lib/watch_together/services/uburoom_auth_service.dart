@@ -124,12 +124,15 @@ class UburoomAuthService {
     NativeHandoffSession session, {
     Duration timeout = const Duration(minutes: 5),
     Duration interval = const Duration(milliseconds: 1500),
+    bool Function()? isCancelled,
   }) async {
     final deadline = DateTime.now().add(timeout);
     final uri = Uri.parse('${session.serverUrl}/api/watch/handoff/native/poll');
 
     while (DateTime.now().isBefore(deadline)) {
+      if (isCancelled?.call() == true) return null;
       await Future<void>.delayed(interval);
+      if (isCancelled?.call() == true) return null;
       try {
         final response = await _client.post(
           uri,
@@ -157,11 +160,26 @@ class UburoomAuthService {
   }
 
   static String normalizeServerUrl(String input) {
-    var raw = input.trim();
-    if (!raw.startsWith('http://') && !raw.startsWith('https://')) {
-      raw = 'https://$raw';
+    final raw = input.trim();
+    if (raw.isEmpty) {
+      throw const FormatException('Server URL cannot be empty');
     }
-    final uri = Uri.parse(raw);
-    return '${uri.scheme}://${uri.host}${uri.hasPort ? ':${uri.port}' : ''}';
+    final Uri uri;
+    if (raw.contains('://')) {
+      uri = Uri.parse(raw);
+      final scheme = uri.scheme.toLowerCase();
+      if (scheme != 'http' && scheme != 'https') {
+        throw FormatException('Invalid server URL scheme "$scheme" in "$input"');
+      }
+    } else {
+      uri = Uri.parse('https://$raw');
+    }
+    final host = uri.host.toLowerCase();
+    if (host.isEmpty) {
+      throw FormatException('Invalid server URL: missing host in "$input"');
+    }
+    final scheme = uri.scheme.toLowerCase();
+    final authority = host.contains(':') && !host.startsWith('[') ? '[$host]' : host;
+    return '$scheme://$authority${uri.hasPort ? ':${uri.port}' : ''}';
   }
 }

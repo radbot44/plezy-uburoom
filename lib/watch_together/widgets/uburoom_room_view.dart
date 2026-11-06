@@ -42,11 +42,51 @@ class UburoomRoomView extends StatelessWidget {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          state.roomName.isNotEmpty ? state.roomName : state.id,
-                          style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                state.roomName.isNotEmpty ? state.roomName : state.id,
+                                style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            if (state.durable) ...[
+                              const SizedBox(width: 8),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: theme.colorScheme.secondaryContainer,
+                                  borderRadius: const BorderRadius.all(Radius.circular(4)),
+                                ),
+                                child: Text(
+                                  'Saved room',
+                                  style: theme.textTheme.labelSmall?.copyWith(
+                                    color: theme.colorScheme.onSecondaryContainer,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ],
+                            if (state.visibility == 'private') ...[
+                              const SizedBox(width: 8),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: theme.colorScheme.tertiaryContainer,
+                                  borderRadius: const BorderRadius.all(Radius.circular(4)),
+                                ),
+                                child: Text(
+                                  'Private',
+                                  style: theme.textTheme.labelSmall?.copyWith(
+                                    color: theme.colorScheme.onTertiaryContainer,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ],
                         ),
                         Text(
                           state.id,
@@ -59,6 +99,11 @@ class UburoomRoomView extends StatelessWidget {
                         ),
                       ],
                     ),
+                  ),
+                  IconButton(
+                    icon: const AppIcon(Symbols.content_copy_rounded),
+                    tooltip: 'Copy room ID',
+                    onPressed: () => unawaited(copyRoomCode(context, state.id)),
                   ),
                 ],
               ),
@@ -124,6 +169,18 @@ class UburoomRoomView extends StatelessWidget {
                           }
                         },
                       ),
+                    if (state.hasMedia && state.canPlayback && state.queue.isNotEmpty)
+                      OutlinedButton.icon(
+                        icon: const AppIcon(Symbols.skip_next_rounded),
+                        label: const Text('Next'),
+                        onPressed: () => unawaited(provider.skipToNextInUburoom()),
+                      ),
+                    if (isHost && state.canPlayback)
+                      OutlinedButton.icon(
+                        icon: const AppIcon(Symbols.stop_rounded),
+                        label: const Text('Stop'),
+                        onPressed: () => provider.stopMedia(),
+                      ),
                   ],
                 ),
               ] else ...[
@@ -149,6 +206,68 @@ class UburoomRoomView extends StatelessWidget {
             ],
           ),
         ),
+        if (state.durable || state.queue.isNotEmpty)
+          _Card(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Row(
+                    children: [
+                      Text(
+                        'Queue (${state.queue.length})',
+                        style: theme.textTheme.titleSmall?.copyWith(color: theme.colorScheme.primary),
+                      ),
+                      if (state.canPlayback || isHost) ...[
+                        if (state.durable || state.autoQueue) ...[
+                          const SizedBox(width: 8),
+                          FilterChip(
+                            label: const Text('Auto-queue'),
+                            selected: state.autoQueue,
+                            visualDensity: VisualDensity.compact,
+                            onSelected: (value) => unawaited(provider.setUburoomAutoQueue(value)),
+                          ),
+                        ],
+                      ] else if (state.autoQueue) ...[
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: theme.colorScheme.secondaryContainer,
+                            borderRadius: const BorderRadius.all(Radius.circular(4)),
+                          ),
+                          child: Text(
+                            'Auto-queue',
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: theme.colorScheme.onSecondaryContainer,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 8),
+                if (state.queue.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    child: Text('Queue is empty'),
+                  )
+                else
+                  for (var i = 0; i < state.queue.length; i++)
+                    _QueueTile(
+                      index: i + 1,
+                      item: state.queue[i],
+                      onRemove: (state.canPlayback || isHost)
+                          ? () => unawaited(provider.removeFromUburoomQueue(state.queue[i].id))
+                          : null,
+                    ),
+              ],
+            ),
+          ),
         _Card(
           padding: const EdgeInsets.symmetric(vertical: 12),
           child: Column(
@@ -263,6 +382,47 @@ class _ParticipantTile extends StatelessWidget {
         ],
       ),
       subtitle: Text(details, style: theme.textTheme.bodySmall),
+    );
+  }
+}
+
+class _QueueTile extends StatelessWidget {
+  const _QueueTile({required this.index, required this.item, this.onRemove});
+
+  final int index;
+  final UburoomQueueItem item;
+  final VoidCallback? onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final durationStr = item.durationSeconds > 0
+        ? formatDurationTimestamp(Duration(seconds: item.durationSeconds.round()))
+        : null;
+    final subtitleParts = <String>[if (item.subtitle.isNotEmpty) item.subtitle, ?durationStr];
+    final subtitleText = subtitleParts.isNotEmpty ? subtitleParts.join(' · ') : null;
+
+    return ListTile(
+      leading: CircleAvatar(
+        radius: 14,
+        backgroundColor: theme.colorScheme.surfaceContainerHighest,
+        child: Text(
+          '$index',
+          style: theme.textTheme.labelSmall?.copyWith(
+            fontWeight: FontWeight.bold,
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+      ),
+      title: Text(item.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: subtitleText != null ? Text(subtitleText, style: theme.textTheme.bodySmall) : null,
+      trailing: onRemove != null
+          ? IconButton(
+              icon: const AppIcon(Symbols.close_rounded, size: 18),
+              tooltip: 'Remove from queue',
+              onPressed: onRemove,
+            )
+          : null,
     );
   }
 }

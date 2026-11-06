@@ -96,6 +96,44 @@ void main() {
     test('agrees with the SDK formatting', () {
       expect(owp.formatCode(normalizeRoomCode('k7m q2x')!), 'K7M-Q2X');
     });
+
+    test('extracts uburoom uuid from invite urls and fragments', () {
+      const expectedUuid = '12345678-1234-1234-1234-123456789abc';
+
+      expect(normalizeRoomCode('https://watch.example.com/rooms/12345678-1234-1234-1234-123456789abc'), expectedUuid);
+      expect(normalizeRoomCode('https://watch.example.com/watch/12345678-1234-1234-1234-123456789abc'), expectedUuid);
+      expect(normalizeRoomCode('https://watch.example.com/r/12345678-1234-1234-1234-123456789abc'), expectedUuid);
+      expect(normalizeRoomCode('https://watch.example.com/?roomId=12345678-1234-1234-1234-123456789abc'), expectedUuid);
+      expect(normalizeRoomCode('https://watch.example.com/?room=12345678-1234-1234-1234-123456789abc'), expectedUuid);
+      expect(normalizeRoomCode('https://watch.example.com/#room=12345678-1234-1234-1234-123456789abc'), expectedUuid);
+      expect(normalizeRoomCode('https://watch.example.com/#12345678-1234-1234-1234-123456789abc'), expectedUuid);
+      expect(normalizeRoomCode('https://watch.example.com/#/rooms/12345678-1234-1234-1234-123456789abc'), expectedUuid);
+      expect(normalizeRoomCode('?roomId=12345678-1234-1234-1234-123456789abc'), expectedUuid);
+      expect(normalizeRoomCode('?room=12345678-1234-1234-1234-123456789abc'), expectedUuid);
+      expect(normalizeRoomCode('#room=12345678-1234-1234-1234-123456789abc'), expectedUuid);
+      expect(normalizeRoomCode('#12345678-1234-1234-1234-123456789abc'), expectedUuid);
+    });
+
+    test('lowercases uppercase uuids in urls and raw inputs', () {
+      const upper = 'ABCDEF12-3456-7890-ABCD-EF1234567890';
+      const lower = 'abcdef12-3456-7890-abcd-ef1234567890';
+      expect(normalizeRoomCode('https://watch.example.com/rooms/$upper'), lower);
+      expect(normalizeRoomCode('https://watch.example.com/#room=$upper'), lower);
+      expect(normalizeRoomCode(upper), lower);
+    });
+
+    test('handles 8-hex room codes across urls and fragments', () {
+      expect(normalizeRoomCode('https://watch.example.com/rooms/1a2b3c4d'), '1a2b3c4d');
+      expect(normalizeRoomCode('https://watch.example.com/#room=1a2b3c4d'), '1a2b3c4d');
+      expect(normalizeRoomCode('https://watch.example.com/#1a2b3c4d'), '1a2b3c4d');
+      expect(normalizeRoomCode('#room=1a2b3c4d'), '1a2b3c4d');
+      expect(normalizeRoomCode('1A2B3C4D'), '1a2b3c4d');
+    });
+
+    test('refuses urls with no room code candidate', () {
+      expect(normalizeRoomCode('https://watch.example.com/'), isNull);
+      expect(normalizeRoomCode('https://watch.example.com/about'), isNull);
+    });
   });
 
   test('room bounds are the SDK limits', () {

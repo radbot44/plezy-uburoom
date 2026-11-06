@@ -57,6 +57,8 @@ class UburoomSocketService {
   UburoomConnectionState _state = UburoomConnectionState.disconnected;
   UburoomConnectionState get state => _state;
   bool get isConnected => _state == UburoomConnectionState.connected;
+  bool get isExplicitlyClosed => _explicitlyClosed;
+  bool get hasActiveReconnectTimer => _reconnectTimer?.isActive ?? false;
 
   String? _serverUrl;
   String? _token;
@@ -121,6 +123,12 @@ class UburoomSocketService {
     try {
       _cleanupChannel();
       final channel = await _channelFactory(wsUri, origin);
+      if (_explicitlyClosed) {
+        try {
+          unawaited(channel.sink.close());
+        } catch (_) {}
+        return;
+      }
       _channel = channel;
       _subscription = channel.stream.listen(_onMessage, onError: _onError, onDone: _onDone, cancelOnError: true);
 
@@ -129,6 +137,12 @@ class UburoomSocketService {
       _sendRaw({'type': 'auth', 'token': _token});
 
       await _authCompleter!.future.timeout(const Duration(seconds: 5));
+
+      if (_explicitlyClosed) {
+        _cleanupChannel();
+        _setState(UburoomConnectionState.disconnected);
+        return;
+      }
 
       _reconnectAttempts = 0;
       _setState(UburoomConnectionState.connected);
@@ -243,6 +257,19 @@ class UburoomSocketService {
             _authCompleter!.complete();
           }
           break;
+        case 'auth-error':
+        case 'error':
+          if (_state == UburoomConnectionState.authenticating &&
+              _authCompleter != null &&
+              !_authCompleter!.isCompleted) {
+            final dynamic val = json['value'];
+            final errorMsg =
+                json['error'] ?? json['message'] ?? (val is Map ? val['error'] : null) ?? 'Authentication failed';
+            _authCompleter!.completeError(SocketException(errorMsg.toString()));
+          } else {
+            appLogger.w('UburoomSocketService: received $type: ${json['error'] ?? json['message']}');
+          }
+          break;
         case 'clock':
           final id = json['id'] as int?;
           if (id != null) {
@@ -318,6 +345,7 @@ class UburoomSocketService {
   }
 
   void _scheduleReconnect() {
+    if (_explicitlyClosed) return;
     _setState(UburoomConnectionState.reconnecting);
     _reconnectTimer?.cancel();
     _reconnectAttempts++;
@@ -366,6 +394,7 @@ class UburoomSocketService {
     _explicitlyClosed = true;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
+    _reconnectAttempts = 0;
     _cleanupChannel();
     _setState(UburoomConnectionState.disconnected);
   }

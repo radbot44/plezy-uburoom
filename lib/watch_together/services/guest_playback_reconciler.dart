@@ -125,6 +125,9 @@ class GuestPlaybackReconciler {
   }
 
   void updateRoomSnapshot(Map<String, dynamic> snapshot) {
+    final prevPaused = _paused;
+    final prevWaitingForReady = _waitingForReady;
+
     _lastSnapshot = snapshot;
     _snapshotServerTime = (snapshot['serverNow'] as int?) ?? clockSync.serverNow;
 
@@ -172,8 +175,34 @@ class GuestPlaybackReconciler {
 
     _waitingForReady = newWaitingForReady;
 
+    final bool pausedTransition =
+        _paused && !_waitingForReady && (!prevPaused || prevWaitingForReady || !adapter.paused);
+
+    if (pausedTransition) {
+      if (!adapter.paused) {
+        unawaited(adapter.pause());
+      }
+      _resetSlewIfNeeded();
+      final targetPos = targetPositionMs;
+      final drift = (adapter.positionMs - targetPos).abs();
+      if (drift > 250 && !_seekInFlight) {
+        _seekInFlight = true;
+        _discontinuity++;
+        _lastSeekAt = clockSync.serverNow;
+        unawaited(
+          adapter.seek(targetPos).whenComplete(() {
+            _seekInFlight = false;
+          }),
+        );
+      }
+    }
+
     _handleReadinessGate();
     _handleStartCountdown();
+
+    if (prevWaitingForReady != _waitingForReady || prevPaused != _paused) {
+      _dispatchSyncQuality(force: true);
+    }
   }
 
   void _onRoomStatePush(UburoomRoomStatePush push) {
@@ -558,7 +587,7 @@ class GuestPlaybackReconciler {
     );
   }
 
-  void _dispatchSyncQuality() {
+  void _dispatchSyncQuality({bool force = false}) {
     if (_disposed || !socketService.isConnected) return;
     if (!_roomIdPattern.hasMatch(roomId) ||
         !_uuidPattern.hasMatch(viewerId) ||
@@ -573,7 +602,9 @@ class GuestPlaybackReconciler {
 
     final String status = adapter.buffering
         ? 'buffering'
-        : (adapter.player.state.completed ? 'paused' : (adapter.paused ? 'paused' : 'playing'));
+        : (adapter.player.state.completed
+              ? 'paused'
+              : ((adapter.paused || _paused || _waitingForReady) ? 'paused' : 'playing'));
 
     final double score = (1.0 - (driftMs.abs() / 2000.0)).clamp(0.0, 1.0);
     final String confidence = clockSync.isSynchronized ? 'confident' : 'reduced';
@@ -583,7 +614,7 @@ class GuestPlaybackReconciler {
     final bool confidenceChanged = confidence != _lastSyncQualityConfidence;
     final int minInterval = (statusChanged || confidenceChanged) ? 500 : 4000;
 
-    if (now - _lastSyncQualitySentAt < minInterval) return;
+    if (!force && now - _lastSyncQualitySentAt < minInterval) return;
 
     _lastSyncQualitySentAt = now;
     _lastSyncQualityStatus = status;
@@ -602,6 +633,10 @@ class GuestPlaybackReconciler {
   }
 
   void dispose() {
+    if (_currentSlewRate != 1.0 && adapter.canSetRate && !adapter.isReleased) {
+      _currentSlewRate = 1.0;
+      unawaited(adapter.setRate(1.0));
+    }
     _disposed = true;
     _tickTimer?.cancel();
     _tickTimer = null;

@@ -192,5 +192,52 @@ void main() {
       expect(msg['confidence'], equals('confident'));
       expect(msg['status'], equals('playing'));
     });
+
+    test('fails immediately on auth-error frame and disconnect cleans up without reconnect', () async {
+      final connectFuture = service.connect(
+        serverUrl: 'https://uburoom.example.com',
+        token: 'invalid-token-1234567890abcdef1234567890abcdef1234567890abcdef12345678',
+      );
+
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(service.state, equals(UburoomConnectionState.authenticating));
+
+      // Server sends auth-error
+      fakeChannel.controller.add(jsonEncode({'type': 'auth-error', 'error': 'invalid-token'}));
+
+      // Must complete immediately instead of waiting for 5-second auth timeout
+      await connectFuture.timeout(const Duration(milliseconds: 500));
+
+      expect(service.state, equals(UburoomConnectionState.reconnecting));
+      expect(service.hasActiveReconnectTimer, isTrue);
+
+      // Clean disconnect cancels reconnect timer and transitions to disconnected
+      await service.disconnect();
+      expect(service.state, equals(UburoomConnectionState.disconnected));
+      expect(service.isExplicitlyClosed, isTrue);
+      expect(service.hasActiveReconnectTimer, isFalse);
+
+      // Ensure no further reconnect attempts are scheduled
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(service.state, equals(UburoomConnectionState.disconnected));
+      expect(service.hasActiveReconnectTimer, isFalse);
+    });
+
+    test('fails immediately on error frame during authentication', () async {
+      final connectFuture = service.connect(serverUrl: 'https://uburoom.example.com', token: 'bad-token');
+
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(service.state, equals(UburoomConnectionState.authenticating));
+
+      // Server sends error frame
+      fakeChannel.controller.add(jsonEncode({'type': 'error', 'error': 'unauthorized'}));
+
+      await connectFuture.timeout(const Duration(milliseconds: 500));
+      expect(service.state, equals(UburoomConnectionState.reconnecting));
+
+      await service.disconnect();
+      expect(service.state, equals(UburoomConnectionState.disconnected));
+      expect(service.hasActiveReconnectTimer, isFalse);
+    });
   });
 }
