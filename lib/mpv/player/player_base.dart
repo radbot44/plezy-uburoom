@@ -1283,6 +1283,9 @@ abstract class PlayerBase with PlayerStreamControllersMixin implements Player {
   Future<void> awaitDisplayModeSwitch({int extraDelayMs = 0}) async {}
 
   @override
+  VideoDecoderHold? holdVideoDecoderAtPreload() => null;
+
+  @override
   Future<bool> setVisible(bool visible, {bool restoreOnWindowVisible = false}) async {
     if (_disposed) return false;
     try {

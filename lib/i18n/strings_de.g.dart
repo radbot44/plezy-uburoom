@@ -115,8 +115,8 @@ class _Translations$appIcon$de extends Translations$appIcon$en {
 	@override String get title => 'App-Symbol';
 	@override String get defaultIcon => 'Standard';
 	@override String get current => 'Aktuelles Symbol';
-	@override String get locked => 'Supporter-Vorteil';
-	@override String get lockedHint => 'Alternative Symbole sind ein Supporter-Vorteil.';
+	@override String get locked => 'Teil des Design- und Symbolpakets';
+	@override String get lockedHint => 'Alternative Symbole sind Teil des Design- und Symbolpakets.';
 	@override String get changeFailed => 'App-Symbol konnte nicht geändert werden';
 	@override String get launcherHint => 'Das neue Symbol erscheint auf deinem Startbildschirm, sobald du Plezy verlässt.';
 	@override String get tvLauncherHint => 'Das neue Banner erscheint, sobald du Plezy verlässt. Android TV zeigt eventuell noch das alte an, bis der Fernseher neu gestartet wird.';
@@ -246,8 +246,8 @@ class _Translations$supporter$de extends Translations$supporter$en {
 	final TranslationsDe _root; // ignore: unused_field
 
 	// Translations
-	@override String get title => 'Plezy Supporter';
-	@override String get intro => 'Ein einmaliger Kauf, der die Entwicklung von Plezy unterstützt und kosmetische Extras freischaltet:';
+	@override String get title => 'Design- und Symbolpaket';
+	@override String get intro => 'Ein optionaler einmaliger Kauf mit kosmetischen Extras:';
 	@override String get presetThemes => 'Design-Vorlagen';
 	@override String get presetThemesDescription => 'Glut, Gletscher, Wald, Pflaume und Papier';
 	@override String get customTheme => 'Eigenes Design';
@@ -258,11 +258,11 @@ class _Translations$supporter$de extends Translations$supporter$en {
 	@override String get loadingPrice => 'Preis wird geladen …';
 	@override String get restore => 'Käufe wiederherstellen';
 	@override String get pending => 'Dein Kauf wartet auf Zahlung oder Genehmigung. Die Extras werden freigeschaltet, sobald der Store ihn abschließt.';
-	@override String get thankYouTitle => 'Danke, dass du Plezy unterstützt';
-	@override String get thankYouBody => 'Deine Supporter-Extras sind freigeschaltet.';
+	@override String get thankYouTitle => 'Danke für deinen Kauf';
+	@override String get thankYouBody => 'Das Design- und Symbolpaket ist freigeschaltet.';
 	@override String get tileSubtitle => 'Designs und App-Symbole mit einem einmaligen Kauf freischalten';
 	@override String get tileSubtitleThemesOnly => 'Designs mit einem einmaligen Kauf freischalten';
-	@override String get tileUnlocked => 'Danke für deine Unterstützung';
+	@override String get tileUnlocked => 'Freigeschaltet – danke für deinen Kauf';
 	@override late final _Translations$supporter$errors$de errors = _Translations$supporter$errors$de._(_root);
 }
 
@@ -602,6 +602,7 @@ class _Translations$settings$de extends Translations$settings$en {
 	@override String get scopePlaybackSpeed => 'Wiedergabegeschwindigkeit';
 	@override String get scopeShaderPreset => 'Shader-Voreinstellung';
 	@override String get scopeAspectRatio => 'Seitenverhältnis';
+	@override String get scopeZoom => 'Zoom';
 	@override String get scopeSyncOffsets => 'Audio- und Untertitelsynchronisierung';
 	@override String get playerScopeOff => 'Nicht speichern';
 	@override String get playerScopeGlobal => 'Überall';
@@ -623,8 +624,8 @@ class _Translations$themeEditor$de extends Translations$themeEditor$en {
 	@override String get customEmpty => 'Noch nicht erstellt';
 	@override String get editCustom => 'Eigenes Design bearbeiten';
 	@override String get editCustomDescription => 'Jede Farbe selbst wählen';
-	@override String get locked => 'Mit Supporter freischalten';
-	@override String get savedLocked => 'Gespeichert – wird mit Supporter freigeschaltet';
+	@override String get locked => 'Mit dem Design- und Symbolpaket freischalten';
+	@override String get savedLocked => 'Gespeichert – wird mit dem Design- und Symbolpaket freigeschaltet';
 	@override String get title => 'Eigenes Design';
 	@override String get startFrom => 'Basierend auf';
 	@override String get startFromDescription => 'Alle Farben aus einem anderen Design übernehmen';
@@ -2541,11 +2542,11 @@ class _Translations$supporter$errors$de extends Translations$supporter$errors$en
 
 	// Translations
 	@override String get storeUnavailable => 'Käufe sind nicht verfügbar. Prüfe, ob du im Store angemeldet bist und Käufe auf diesem Gerät erlaubt sind.';
-	@override String get productNotFound => 'Der Supporter-Kauf ist in deinem Store derzeit nicht verfügbar.';
+	@override String get productNotFound => 'Das Design- und Symbolpaket ist in deinem Store derzeit nicht verfügbar.';
 	@override String get productQueryFailed => 'Der Preis konnte nicht geladen werden. Prüfe deine Verbindung und versuche es erneut.';
 	@override String get purchaseFailed => 'Der Kauf wurde nicht abgeschlossen. Versuche es erneut.';
 	@override String get restoreFailed => 'Der Store ist nicht erreichbar, daher konnte dein Kauf nicht wiederhergestellt werden. Versuche es erneut.';
-	@override String get nothingToRestore => 'Für dieses Store-Konto wurde kein Supporter-Kauf gefunden.';
+	@override String get nothingToRestore => 'Für dieses Store-Konto wurde kein Kauf des Design- und Symbolpakets gefunden.';
 }
 
 // Path: themeEditor.slots
@@ -3401,8 +3402,8 @@ extension on TranslationsDe {
 			'appIcon.title' => 'App-Symbol',
 			'appIcon.defaultIcon' => 'Standard',
 			'appIcon.current' => 'Aktuelles Symbol',
-			'appIcon.locked' => 'Supporter-Vorteil',
-			'appIcon.lockedHint' => 'Alternative Symbole sind ein Supporter-Vorteil.',
+			'appIcon.locked' => 'Teil des Design- und Symbolpakets',
+			'appIcon.lockedHint' => 'Alternative Symbole sind Teil des Design- und Symbolpakets.',
 			'appIcon.changeFailed' => 'App-Symbol konnte nicht geändert werden',
 			'appIcon.launcherHint' => 'Das neue Symbol erscheint auf deinem Startbildschirm, sobald du Plezy verlässt.',
 			'appIcon.tvLauncherHint' => 'Das neue Banner erscheint, sobald du Plezy verlässt. Android TV zeigt eventuell noch das alte an, bis der Fernseher neu gestartet wird.',
@@ -3532,8 +3533,8 @@ extension on TranslationsDe {
 			'update.viewRelease' => 'Versionshinweise anzeigen',
 			'update.latestVersion' => 'Aktuellste Version installiert',
 			'update.checkFailed' => 'Fehler bei der Updateprüfung',
-			'supporter.title' => 'Plezy Supporter',
-			'supporter.intro' => 'Ein einmaliger Kauf, der die Entwicklung von Plezy unterstützt und kosmetische Extras freischaltet:',
+			'supporter.title' => 'Design- und Symbolpaket',
+			'supporter.intro' => 'Ein optionaler einmaliger Kauf mit kosmetischen Extras:',
 			'supporter.presetThemes' => 'Design-Vorlagen',
 			'supporter.presetThemesDescription' => 'Glut, Gletscher, Wald, Pflaume und Papier',
 			'supporter.customTheme' => 'Eigenes Design',
@@ -3544,17 +3545,17 @@ extension on TranslationsDe {
 			'supporter.loadingPrice' => 'Preis wird geladen …',
 			'supporter.restore' => 'Käufe wiederherstellen',
 			'supporter.pending' => 'Dein Kauf wartet auf Zahlung oder Genehmigung. Die Extras werden freigeschaltet, sobald der Store ihn abschließt.',
-			'supporter.thankYouTitle' => 'Danke, dass du Plezy unterstützt',
-			'supporter.thankYouBody' => 'Deine Supporter-Extras sind freigeschaltet.',
+			'supporter.thankYouTitle' => 'Danke für deinen Kauf',
+			'supporter.thankYouBody' => 'Das Design- und Symbolpaket ist freigeschaltet.',
 			'supporter.tileSubtitle' => 'Designs und App-Symbole mit einem einmaligen Kauf freischalten',
 			'supporter.tileSubtitleThemesOnly' => 'Designs mit einem einmaligen Kauf freischalten',
-			'supporter.tileUnlocked' => 'Danke für deine Unterstützung',
+			'supporter.tileUnlocked' => 'Freigeschaltet – danke für deinen Kauf',
 			'supporter.errors.storeUnavailable' => 'Käufe sind nicht verfügbar. Prüfe, ob du im Store angemeldet bist und Käufe auf diesem Gerät erlaubt sind.',
-			'supporter.errors.productNotFound' => 'Der Supporter-Kauf ist in deinem Store derzeit nicht verfügbar.',
+			'supporter.errors.productNotFound' => 'Das Design- und Symbolpaket ist in deinem Store derzeit nicht verfügbar.',
 			'supporter.errors.productQueryFailed' => 'Der Preis konnte nicht geladen werden. Prüfe deine Verbindung und versuche es erneut.',
 			'supporter.errors.purchaseFailed' => 'Der Kauf wurde nicht abgeschlossen. Versuche es erneut.',
 			'supporter.errors.restoreFailed' => 'Der Store ist nicht erreichbar, daher konnte dein Kauf nicht wiederhergestellt werden. Versuche es erneut.',
-			'supporter.errors.nothingToRestore' => 'Für dieses Store-Konto wurde kein Supporter-Kauf gefunden.',
+			'supporter.errors.nothingToRestore' => 'Für dieses Store-Konto wurde kein Kauf des Design- und Symbolpakets gefunden.',
 			'settings.title' => 'Einstellungen',
 			'settings.supportDeveloper' => 'Plezy unterstützen',
 			'settings.supportDeveloperDescription' => 'Per Liberapay spenden, um die Entwicklung zu fördern',
@@ -3884,6 +3885,7 @@ extension on TranslationsDe {
 			'settings.scopePlaybackSpeed' => 'Wiedergabegeschwindigkeit',
 			'settings.scopeShaderPreset' => 'Shader-Voreinstellung',
 			'settings.scopeAspectRatio' => 'Seitenverhältnis',
+			'settings.scopeZoom' => 'Zoom',
 			'settings.scopeSyncOffsets' => 'Audio- und Untertitelsynchronisierung',
 			'settings.playerScopeOff' => 'Nicht speichern',
 			'settings.playerScopeGlobal' => 'Überall',
@@ -3896,8 +3898,8 @@ extension on TranslationsDe {
 			'themeEditor.customEmpty' => 'Noch nicht erstellt',
 			'themeEditor.editCustom' => 'Eigenes Design bearbeiten',
 			'themeEditor.editCustomDescription' => 'Jede Farbe selbst wählen',
-			'themeEditor.locked' => 'Mit Supporter freischalten',
-			'themeEditor.savedLocked' => 'Gespeichert – wird mit Supporter freigeschaltet',
+			'themeEditor.locked' => 'Mit dem Design- und Symbolpaket freischalten',
+			'themeEditor.savedLocked' => 'Gespeichert – wird mit dem Design- und Symbolpaket freigeschaltet',
 			'themeEditor.title' => 'Eigenes Design',
 			'themeEditor.startFrom' => 'Basierend auf',
 			'themeEditor.startFromDescription' => 'Alle Farben aus einem anderen Design übernehmen',
@@ -3908,9 +3910,9 @@ extension on TranslationsDe {
 			'themeEditor.slots.outline' => 'Kontur',
 			'themeEditor.slots.text' => 'Text',
 			'themeEditor.slots.textMuted' => 'Sekundärtext',
-			'themeEditor.slots.accent' => 'Akzent',
 			_ => null,
 		} ?? switch (path) {
+			'themeEditor.slots.accent' => 'Akzent',
 			'themeEditor.opacity' => 'Deckkraft',
 			'themeEditor.hexHint' => '#RRGGBB oder #AARRGGBB',
 			'themeEditor.fromOtherThemes' => 'Aus anderen Designs',
@@ -4422,9 +4424,9 @@ extension on TranslationsDe {
 			'profiles.pinsDontMatch' => 'PINs stimmen nicht überein',
 			'profiles.tokenIdentityMismatch' => 'Das Plex-Profil-Token wurde einem unerwarteten Server zugeordnet',
 			'connections.sectionTitle' => 'Verbindungen',
-			'connections.addConnection' => 'Verbindung hinzufügen',
 			_ => null,
 		} ?? switch (path) {
+			'connections.addConnection' => 'Verbindung hinzufügen',
 			'connections.addConnectionSubtitleNoProfile' => 'Mit Plex anmelden oder mit einem Jellyfin- oder Emby-Server verbinden',
 			'connections.addConnectionSubtitleScoped' => ({required Object displayName}) => 'Zu ${displayName} hinzufügen: Plex, Jellyfin, Emby oder eine andere Profilverbindung',
 			'connections.sessionExpiredOne' => ({required Object name}) => 'Sitzung für ${name} abgelaufen',
@@ -4936,9 +4938,9 @@ extension on TranslationsDe {
 			'liveTv.recordSettings.anyTime' => 'Zu jeder Zeit aufnehmen',
 			'liveTv.recordSettings.skipInLibrary' => 'Episoden überspringen, die schon in der Bibliothek sind',
 			'liveTv.recordSettings.keepUpTo' => 'Zu behaltende Episoden',
-			'liveTv.recordSettings.keepUpToHint' => '0 behält alle Episoden',
 			_ => null,
 		} ?? switch (path) {
+			'liveTv.recordSettings.keepUpToHint' => '0 behält alle Episoden',
 			'liveTv.startingInMinutes' => ({required Object minutes}) => 'Beginnt in ${minutes} Min.',
 			'liveTv.dayAtTime' => ({required Object day, required Object time}) => '${day} um ${time}',
 			'liveTv.invalidPlaybackData' => ({required Object product}) => '${product} hat ungültige Live-TV-Wiedergabedaten zurückgegeben',
@@ -5450,9 +5452,9 @@ extension on TranslationsDe {
 			'performanceOverlay.decoderMediatekHw' => 'MediaTek HW',
 			'performanceOverlay.decoderExynosHw' => 'Exynos HW',
 			'performanceOverlay.decoderSoftware' => 'Software',
-			'performanceOverlay.decoderHardware' => 'Hardware',
 			_ => null,
 		} ?? switch (path) {
+			'performanceOverlay.decoderHardware' => 'Hardware',
 			'performanceOverlay.tunnelingActive' => 'Aktiv',
 			'performanceOverlay.dvRpuFailed' => ({required Object converted, required Object failures}) => '${converted} (${failures} fehlgeschlagen)',
 			'externalPlayer.title' => 'Externer Player',
