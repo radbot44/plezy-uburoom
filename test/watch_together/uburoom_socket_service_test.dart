@@ -85,11 +85,12 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 10));
       expect(fakeChannel.sink.sent.length, greaterThanOrEqualTo(1));
       final authMsg = jsonDecode(fakeChannel.sink.sent.first) as Map<String, dynamic>;
-      expect(authMsg['type'], equals('auth'));
+      expect(authMsg['type'], equals('hello'));
+      expect(authMsg['protocol'], equals(uburoomProtocolVersion));
       expect(authMsg['token'], equals('0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'));
 
-      // Server sends auth-ok
-      fakeChannel.controller.add(jsonEncode({'type': 'auth-ok', 'connectionId': 42}));
+      // Server welcomes the connection
+      fakeChannel.controller.add(jsonEncode({'type': 'welcome', 'protocol': 2, 'connectionId': 42}));
       await connectFuture;
 
       expect(service.isConnected, isTrue);
@@ -102,7 +103,7 @@ void main() {
         token: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
       );
       await Future<void>.delayed(const Duration(milliseconds: 10));
-      fakeChannel.controller.add(jsonEncode({'type': 'auth-ok', 'connectionId': 1}));
+      fakeChannel.controller.add(jsonEncode({'type': 'welcome', 'protocol': 2, 'connectionId': 1}));
       await connectFuture;
 
       // Clock loop sends clock frame
@@ -131,37 +132,181 @@ void main() {
       expect(clockSync.clockEpoch, equals('epoch-1'));
     });
 
-    test('sendRequest dispatches request and resolves matching response', () async {
+    Future<void> connected() async {
       final connectFuture = service.connect(
         serverUrl: 'https://uburoom.example.com',
         token: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
       );
       await Future<void>.delayed(const Duration(milliseconds: 10));
-      fakeChannel.controller.add(jsonEncode({'type': 'auth-ok', 'connectionId': 1}));
+      fakeChannel.controller.add(jsonEncode({'type': 'welcome', 'protocol': 2, 'connectionId': 1}));
       await connectFuture;
+    }
 
-      final reqFuture = service.sendRequest('/api/watch/rooms', {'test': 123});
+    Map<String, dynamic> lastSent(String type) =>
+        fakeChannel.sink.sent.map((s) => jsonDecode(s) as Map<String, dynamic>).lastWhere((m) => m['type'] == type);
+
+    test('a call resolves with its ack, and a refusal with its status and message', () async {
+      await connected();
+
+      final listed = service.call('rooms.list');
       await Future<void>.delayed(const Duration(milliseconds: 10));
-
-      final reqSent = fakeChannel.sink.sent
-          .map((s) => jsonDecode(s) as Map<String, dynamic>)
-          .firstWhere((m) => m['type'] == 'request' && m['path'] == '/api/watch/rooms');
-      final reqId = reqSent['id'] as int;
-      expect(reqSent['data'], equals({'test': 123}));
-
-      // Simulate server response
+      var sent = lastSent('call');
+      expect(sent['op'], equals('rooms.list'));
       fakeChannel.controller.add(
         jsonEncode({
-          'type': 'response',
-          'id': reqId,
-          'status': 200,
+          'type': 'ack',
+          'id': sent['id'],
           'value': {'rooms': []},
         }),
       );
-
-      final res = await reqFuture;
-      expect(res.status, equals(200));
+      final res = await listed;
+      expect(res.isSuccess, isTrue);
       expect(res.value, equals({'rooms': []}));
+
+      final queued = service.call('room.queue.command', roomId: 'room-1', args: {'action': 'clear'});
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      sent = lastSent('call');
+      expect(sent['roomId'], equals('room-1'));
+      expect(sent['args'], equals({'action': 'clear'}));
+      fakeChannel.controller.add(
+        jsonEncode({'type': 'error', 'id': sent['id'], 'code': 'refused', 'status': 403, 'message': 'Not allowed'}),
+      );
+      final refused = await queued;
+      expect(refused.isSuccess, isFalse);
+      expect(refused.status, equals(403));
+      expect(refused.error, equals('Not allowed'));
+    });
+
+    test('join answers with the merged lanes; pushed lanes are shown only once they describe the same video', () async {
+      await connected();
+      final pushes = <UburoomRoomStatePush>[];
+      final kicked = <String>[];
+      final stateSub = service.roomStateStream.listen(pushes.add);
+      final kickSub = service.roomKickedStream.listen(kicked.add);
+
+      final joining = service.join('room-1', 'viewer-1', quality: 'direct', delivery: 'auto');
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      final sent = lastSent('join');
+      expect(sent['roomId'], equals('room-1'));
+      expect(sent['viewerId'], equals('viewer-1'));
+      expect(sent['preferences'], equals({'quality': 'direct', 'delivery': 'auto'}));
+      fakeChannel.controller.add(
+        jsonEncode({
+          'type': 'ack',
+          'id': sent['id'],
+          'value': {
+            'roomId': 'room-1',
+            'viewerId': 'viewer-1',
+            'room': {
+              'version': 4,
+              'state': {
+                'id': 'room-1',
+                'epoch': 'e1',
+                'mediaVersion': 'm1',
+                'state': {'paused': true, 'position': 3},
+              },
+            },
+            'viewer': {
+              'version': 1,
+              'state': {
+                'mediaVersion': 'm1',
+                'streamVersion': 's1',
+                'mediaUrl': '/api/watch/media/g1/start',
+                'volume': 30,
+                'muted': false,
+              },
+            },
+          },
+        }),
+      );
+      final joined = await joining;
+      expect(joined.isSuccess, isTrue);
+      expect(joined.value['epoch'], equals('e1'));
+      expect(joined.value['mediaUrl'], equals('/api/watch/media/g1/start'));
+      expect(joined.value['state'], equals({'paused': true, 'position': 3, 'volume': 30, 'muted': false}));
+
+      // The room moves to another video: its lane alone is not shown with the old stream.
+      fakeChannel.controller.add(
+        jsonEncode({
+          'type': 'room',
+          'roomId': 'room-1',
+          'viewerId': 'viewer-1',
+          'version': 5,
+          'state': {
+            'id': 'room-1',
+            'epoch': 'e1',
+            'mediaVersion': 'm2',
+            'state': {'paused': true, 'position': 0},
+          },
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(pushes, isEmpty);
+      fakeChannel.controller.add(
+        jsonEncode({
+          'type': 'viewer',
+          'roomId': 'room-1',
+          'viewerId': 'viewer-1',
+          'version': 2,
+          'state': {'mediaVersion': 'm2', 'streamVersion': 's2', 'volume': 30, 'muted': false},
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(pushes, hasLength(1));
+      expect(pushes.single.isSuccess, isTrue);
+      expect(pushes.single.value['mediaVersion'], equals('m2'));
+      expect(pushes.single.value['streamVersion'], equals('s2'));
+      expect(pushes.single.value.containsKey('mediaUrl'), isFalse, reason: 'a lane replaces that lane whole');
+
+      // An older lane, or one for another tab, is dropped.
+      fakeChannel.controller.add(
+        jsonEncode({
+          'type': 'room',
+          'roomId': 'room-1',
+          'viewerId': 'viewer-1',
+          'version': 3,
+          'state': {'mediaVersion': 'm2', 'epoch': 'stale'},
+        }),
+      );
+      fakeChannel.controller.add(
+        jsonEncode({
+          'type': 'room',
+          'roomId': 'room-1',
+          'viewerId': 'another-tab',
+          'version': 9,
+          'state': {'mediaVersion': 'm2', 'epoch': 'foreign'},
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(pushes, hasLength(1));
+
+      // The room lets this tab go: a refusal that says to join again.
+      fakeChannel.controller.add(
+        jsonEncode({
+          'type': 'error',
+          'code': 'room',
+          'roomId': 'room-1',
+          'viewerId': 'viewer-1',
+          'status': 409,
+          'message': 'You are no longer in this room; join again',
+          'rejoin': true,
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(pushes, hasLength(2));
+      expect(pushes.last.isSuccess, isFalse);
+      expect(pushes.last.status, equals(409));
+      expect(pushes.last.rejoin, isTrue);
+      expect(pushes.last.error, equals('You are no longer in this room; join again'));
+
+      fakeChannel.controller.add(
+        jsonEncode({'type': 'error', 'code': 'removed', 'roomId': 'room-1', 'status': 403, 'message': 'Removed'}),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(kicked, equals(['room-1']));
+
+      await stateSub.cancel();
+      await kickSub.cancel();
     });
 
     test('sendSyncQuality emits telemetry message', () async {
@@ -170,7 +315,7 @@ void main() {
         token: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
       );
       await Future<void>.delayed(const Duration(milliseconds: 10));
-      fakeChannel.controller.add(jsonEncode({'type': 'auth-ok', 'connectionId': 1}));
+      fakeChannel.controller.add(jsonEncode({'type': 'welcome', 'protocol': 2, 'connectionId': 1}));
       await connectFuture;
 
       service.sendSyncQuality(
@@ -186,14 +331,14 @@ void main() {
 
       final msg = fakeChannel.sink.sent
           .map((s) => jsonDecode(s) as Map<String, dynamic>)
-          .firstWhere((m) => m['type'] == 'sync-quality');
+          .firstWhere((m) => m['type'] == 'quality');
       expect(msg['roomId'], equals('room-1'));
       expect(msg['score'], equals(0.98));
       expect(msg['confidence'], equals('confident'));
       expect(msg['status'], equals('playing'));
     });
 
-    test('fails immediately on auth-error frame and disconnect cleans up without reconnect', () async {
+    test('fails immediately on a refusal during the handshake and disconnect cleans up without reconnect', () async {
       final connectFuture = service.connect(
         serverUrl: 'https://uburoom.example.com',
         token: 'invalid-token-1234567890abcdef1234567890abcdef1234567890abcdef12345678',
@@ -202,8 +347,15 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 10));
       expect(service.state, equals(UburoomConnectionState.authenticating));
 
-      // Server sends auth-error
-      fakeChannel.controller.add(jsonEncode({'type': 'auth-error', 'error': 'invalid-token'}));
+      // The server is full
+      fakeChannel.controller.add(
+        jsonEncode({
+          'type': 'error',
+          'code': 'full',
+          'status': 429,
+          'message': 'Server full; try again when someone leaves',
+        }),
+      );
 
       // Must complete immediately instead of waiting for 5-second auth timeout
       await connectFuture.timeout(const Duration(milliseconds: 500));
@@ -223,20 +375,39 @@ void main() {
       expect(service.hasActiveReconnectTimer, isFalse);
     });
 
-    test('fails immediately on error frame during authentication', () async {
-      final connectFuture = service.connect(serverUrl: 'https://uburoom.example.com', token: 'bad-token');
+    test('a protocol mismatch is reported in the server\'s words and is not retried', () async {
+      final connectFuture = service.connect(
+        serverUrl: 'https://uburoom.example.com',
+        token: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      );
+      final failed = expectLater(
+        connectFuture,
+        throwsA(
+          isA<UburoomProtocolException>().having(
+            (e) => e.message,
+            'message',
+            'This server speaks room protocol 3; update this app to connect.',
+          ),
+        ),
+      );
 
       await Future<void>.delayed(const Duration(milliseconds: 10));
       expect(service.state, equals(UburoomConnectionState.authenticating));
+      fakeChannel.controller.add(
+        jsonEncode({
+          'type': 'error',
+          'code': 'protocol',
+          'status': 426,
+          'message': 'This server speaks room protocol 3; update this app to connect.',
+          'supported': [3],
+        }),
+      );
+      await failed;
 
-      // Server sends error frame
-      fakeChannel.controller.add(jsonEncode({'type': 'error', 'error': 'unauthorized'}));
-
-      await connectFuture.timeout(const Duration(milliseconds: 500));
-      expect(service.state, equals(UburoomConnectionState.reconnecting));
-
-      await service.disconnect();
       expect(service.state, equals(UburoomConnectionState.disconnected));
+      expect(service.protocolError, isNotNull);
+      expect(service.hasActiveReconnectTimer, isFalse);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
       expect(service.hasActiveReconnectTimer, isFalse);
     });
   });

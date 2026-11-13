@@ -1,3 +1,4 @@
+import 'uburoom_test_requests.dart';
 import 'dart:async';
 
 import 'package:fake_async/fake_async.dart';
@@ -53,7 +54,7 @@ class _TestSocketService extends UburoomSocketService {
   final syncQualities = <Map<String, dynamic>>[];
   // ignore: close_sinks
   final stateController = StreamController<UburoomRoomStatePush>.broadcast();
-  UburoomResponse Function(String path, Map<String, dynamic>? data)? onSendRequest;
+  UburoomResponse Function(String name, Map<String, dynamic>? data)? onSendRequest;
 
   @override
   bool get isConnected => true;
@@ -62,10 +63,16 @@ class _TestSocketService extends UburoomSocketService {
   Stream<UburoomRoomStatePush> get roomStateStream => stateController.stream;
 
   @override
-  Future<UburoomResponse> sendRequest(String path, [Map<String, dynamic>? data]) async {
-    requests.add({'path': path, 'body': data});
+  Future<UburoomResponse> request(
+    Map<String, dynamic> message, {
+    Duration timeout = const Duration(seconds: 12),
+  }) async => framed(message, await answer(requestName(message), requestData(message)));
+
+  /// Answers one request by its name (see uburoom_test_requests.dart).
+  Future<UburoomResponse> answer(String name, [Map<String, dynamic>? data]) async {
+    requests.add({'request': name, 'body': data});
     if (onSendRequest != null) {
-      return onSendRequest!(path, data);
+      return onSendRequest!(name, data);
     }
     return const UburoomResponse(id: 1, status: 200, value: {'ok': true});
   }
@@ -180,7 +187,7 @@ void main() {
         async.flushMicrotasks();
 
         expect(socketService.requests, hasLength(1));
-        expect(socketService.requests.first['path'], '/api/watch/rooms/room-1/ready');
+        expect(socketService.requests.first['request'], 'ready');
         final body = socketService.requests.first['body'] as Map<String, dynamic>;
         expect(body['viewerId'], 'viewer-1');
         expect(body['mediaVersion'], 'mv-1');
@@ -347,7 +354,7 @@ void main() {
       });
     });
 
-    test('observe sends full 12-field payload at 1s periodic cadence', () {
+    test('observe sends the full 11-field observation at 1s periodic cadence', () {
       fakeAsync((async) {
         final clockSync = ClockSync();
         _seedClock(clockSync);
@@ -394,16 +401,15 @@ void main() {
         async.elapse(const Duration(milliseconds: 1000));
         async.flushMicrotasks();
 
-        final observeRequests = socketService.requests
-            .where((r) => (r['path'] as String).endsWith('/observe'))
-            .toList();
+        final observeRequests = socketService.requests.where((r) => r['request'] == 'observe').toList();
 
         expect(observeRequests, hasLength(1));
         expect(reconciler.epoch, 'epoch-uuid-2');
         final body = observeRequests.first['body'] as Map<String, dynamic>;
 
-        // Verify all 12 fields strictly matching server/playback-tracking.js
-        expect(body['viewerId'], 'viewer-1');
+        // Verify all 11 fields strictly matching server/playback-tracking.js; the viewer
+        // travels on the observe message itself.
+        expect(body.containsKey('viewerId'), isFalse);
         expect(body['epoch'], 'epoch-uuid-2');
         expect(body['mediaVersion'], 'mv-10');
         expect(body['streamVersion'], 'sv-20');
@@ -425,7 +431,7 @@ void main() {
         async.elapse(const Duration(milliseconds: 1000));
         async.flushMicrotasks();
 
-        final updatedObserve = socketService.requests.where((r) => (r['path'] as String).endsWith('/observe')).toList();
+        final updatedObserve = socketService.requests.where((r) => r['request'] == 'observe').toList();
         expect(updatedObserve, hasLength(2));
         final secondBody = updatedObserve[1]['body'] as Map<String, dynamic>;
 
@@ -487,8 +493,7 @@ void main() {
         async.flushMicrotasks();
 
         final observe1 =
-            socketService.requests.where((r) => (r['path'] as String).endsWith('/observe')).last['body']
-                as Map<String, dynamic>;
+            socketService.requests.where((r) => r['request'] == 'observe').last['body'] as Map<String, dynamic>;
         expect(observe1['state'], 'playing');
         expect(observe1['discontinuity'], 0);
 
@@ -498,8 +503,7 @@ void main() {
         async.flushMicrotasks();
 
         final observeEnded =
-            socketService.requests.where((r) => (r['path'] as String).endsWith('/observe')).last['body']
-                as Map<String, dynamic>;
+            socketService.requests.where((r) => r['request'] == 'observe').last['body'] as Map<String, dynamic>;
 
         expect(observeEnded['state'], 'ended');
         // Critical: discontinuity must remain identical (0) to allow automatic queue advancement
@@ -551,14 +555,13 @@ void main() {
         async.flushMicrotasks();
 
         final obs1 =
-            socketService.requests.where((r) => (r['path'] as String).endsWith('/observe')).last['body']
-                as Map<String, dynamic>;
+            socketService.requests.where((r) => r['request'] == 'observe').last['body'] as Map<String, dynamic>;
         expect(obs1['observationEpoch'], 'epoch-alpha');
         expect(obs1['sequence'], 1);
 
         // Server returns 409 observation-timeout for next observe
-        socketService.onSendRequest = (path, data) {
-          if (path.endsWith('/observe')) {
+        socketService.onSendRequest = (name, data) {
+          if (name == 'observe') {
             return const UburoomResponse(id: 2, status: 409, value: {'error': 'observation-timeout'});
           }
           return const UburoomResponse(id: 2, status: 200, value: {'ok': true});
@@ -578,8 +581,7 @@ void main() {
         async.flushMicrotasks();
 
         final obs2 =
-            socketService.requests.where((r) => (r['path'] as String).endsWith('/observe')).last['body']
-                as Map<String, dynamic>;
+            socketService.requests.where((r) => r['request'] == 'observe').last['body'] as Map<String, dynamic>;
         expect(obs2['observationEpoch'], 'epoch-beta');
         expect(obs2['sequence'], 1); // Sequence reset after 409/epoch rotate
 
@@ -652,9 +654,7 @@ void main() {
         async.elapse(const Duration(milliseconds: 1000));
         async.flushMicrotasks();
 
-        final observeRequests = socketService.requests
-            .where((r) => (r['path'] as String).endsWith('/observe'))
-            .toList();
+        final observeRequests = socketService.requests.where((r) => r['request'] == 'observe').toList();
         expect(observeRequests, isNotEmpty);
         final body = observeRequests.last['body'] as Map<String, dynamic>;
         // Observation rate must report actual playback rate (1.56), NOT double-multiplied (2.34)
@@ -958,7 +958,7 @@ void main() {
 
       await provider.sendUburoomCommandForTest('media.play');
 
-      final cmdRequests = socketService.requests.where((r) => (r['path'] as String).endsWith('/command')).toList();
+      final cmdRequests = socketService.requests.where((r) => r['request'] == 'command').toList();
       expect(cmdRequests, hasLength(1));
       final body = cmdRequests.first['body'] as Map<String, dynamic>;
       expect(body['epoch'], '3886f4cb-20d4-4a49-a29d-4766e4a2a6d8');

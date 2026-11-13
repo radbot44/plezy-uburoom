@@ -12,27 +12,66 @@ import 'clock_sync.dart';
 
 enum UburoomConnectionState { disconnected, connecting, authenticating, connected, reconnecting }
 
+/// The room protocol version this client speaks (uburoom `docs/wire-protocol.md`,
+/// `shared/wire-protocol.js`). The server refuses any other in the handshake.
+const int uburoomProtocolVersion = 2;
+
+/// The server speaks another protocol version; only updating the app (or the
+/// server) helps, so the socket does not retry.
+class UburoomProtocolException implements Exception {
+  const UburoomProtocolException(this.message);
+  final String message;
+  @override
+  String toString() => message;
+}
+
+/// The server's answer to one request: an `ack` ([status] 200) or an `error`.
+/// For an error, [value] is `{'error': message}` plus `rejection` when given.
 class UburoomResponse {
-  const UburoomResponse({required this.id, required this.status, this.value});
+  const UburoomResponse({required this.id, required this.status, this.value, this.code});
 
   final int id;
   final int status;
   final dynamic value;
 
+  /// The error's `code` (`refused`, `invalid`); null for an ack.
+  final String? code;
+
   bool get isSuccess => status >= 200 && status < 300;
+
+  /// The server's message for a refusal.
+  String? get error => value is Map ? (value as Map)['error']?.toString() : null;
 }
 
+/// The joined room as the server sees it for this tab: the merged `room` and
+/// `viewer` lanes ([status] 200), or a refusal. With [rejoin] the room let this
+/// tab go and it has to join again.
 class UburoomRoomStatePush {
-  const UburoomRoomStatePush({required this.path, required this.status, this.value});
+  const UburoomRoomStatePush({required this.roomId, required this.status, this.value, this.rejoin = false});
 
-  final String path;
+  final String roomId;
   final int status;
   final dynamic value;
+  final bool rejoin;
+
+  bool get isSuccess => status == 200;
+  String? get error => value is Map ? (value as Map)['error']?.toString() : null;
+}
+
+/// A connection-level refusal: sign-in ended (`auth`), the server is full
+/// (`full`) or it cannot publish just now (`unavailable`).
+class UburoomUnavailable {
+  const UburoomUnavailable({required this.code, required this.status, required this.message});
+  final String code;
+  final int status;
+  final String message;
 }
 
 typedef UburoomChannelFactory = Future<WebSocketChannel> Function(Uri uri, String origin);
 
-/// WebSocket service communicating with uburoom's `/watch-socket` endpoint.
+/// The room connection to an uburoom server: typed messages over `/watch-socket`.
+/// Requests are answered by `ack` or `error`; room state arrives as pushed `room`
+/// and `viewer` lanes, which this service merges into one snapshot per change.
 class UburoomSocketService {
   UburoomSocketService({ClockSync? clockSync, UburoomChannelFactory? channelFactory})
     : clockSync = clockSync ?? ClockSync(),
@@ -78,20 +117,32 @@ class UburoomSocketService {
   final Map<int, int> _clockSentAt = {};
   Completer<void>? _authCompleter;
 
+  /// Why the server refused this client's protocol version, once it has.
+  UburoomProtocolException? _protocolError;
+  UburoomProtocolException? get protocolError => _protocolError;
+
+  // The joined room's two lanes as last received, and the tab they belong to.
+  String? _laneRoomId;
+  String? _laneViewerId;
+  Map<String, dynamic>? _roomLane;
+  Map<String, dynamic>? _viewerLane;
+  int _roomLaneVersion = -1;
+  int _viewerLaneVersion = -1;
+
   // ignore: close_sinks
   final _connectionStateController = StreamController<UburoomConnectionState>.broadcast();
   final _identityController = StreamController<Map<String, dynamic>>.broadcast();
   final _roomsController = StreamController<dynamic>.broadcast();
   final _roomStateController = StreamController<UburoomRoomStatePush>.broadcast();
   final _roomKickedController = StreamController<String>.broadcast();
-  final _unavailableController = StreamController<dynamic>.broadcast();
+  final _unavailableController = StreamController<UburoomUnavailable>.broadcast();
 
   Stream<UburoomConnectionState> get connectionStateStream => _connectionStateController.stream;
   Stream<Map<String, dynamic>> get identityStream => _identityController.stream;
   Stream<dynamic> get roomsStream => _roomsController.stream;
   Stream<UburoomRoomStatePush> get roomStateStream => _roomStateController.stream;
   Stream<String> get roomKickedStream => _roomKickedController.stream;
-  Stream<dynamic> get unavailableStream => _unavailableController.stream;
+  Stream<UburoomUnavailable> get unavailableStream => _unavailableController.stream;
 
   void _setState(UburoomConnectionState newState) {
     if (_state == newState) return;
@@ -102,6 +153,7 @@ class UburoomSocketService {
   /// Connects to the uburoom server and authenticates with [token].
   Future<void> connect({required String serverUrl, required String token}) async {
     _explicitlyClosed = false;
+    _protocolError = null;
     _serverUrl = serverUrl;
     _token = token;
     _reconnectAttempts = 0;
@@ -134,7 +186,7 @@ class UburoomSocketService {
 
       _setState(UburoomConnectionState.authenticating);
       _authCompleter = Completer<void>();
-      _sendRaw({'type': 'auth', 'token': _token});
+      _sendRaw({'type': 'hello', 'protocol': uburoomProtocolVersion, 'token': _token});
 
       await _authCompleter!.future.timeout(const Duration(seconds: 5));
 
@@ -150,6 +202,11 @@ class UburoomSocketService {
     } catch (error, stackTrace) {
       appLogger.w('UburoomSocketService: connect/auth failed: $error', error: error, stackTrace: stackTrace);
       _cleanupChannel();
+      if (error is UburoomProtocolException) {
+        // Retrying cannot help; the caller reports it.
+        _setState(UburoomConnectionState.disconnected);
+        rethrow;
+      }
       if (!_explicitlyClosed) {
         _scheduleReconnect();
       } else {
@@ -183,27 +240,187 @@ class UburoomSocketService {
     _sendRaw({'type': 'clock', 'id': id});
   }
 
-  /// Sends a request over the WebSocket multiplexer and awaits the response.
-  Future<UburoomResponse> sendRequest(String path, [Map<String, dynamic>? data]) {
+  /// Sends one request ([message] without its `id`) and awaits its `ack` or
+  /// `error`. Every typed request below goes through here.
+  Future<UburoomResponse> request(Map<String, dynamic> message, {Duration timeout = const Duration(seconds: 12)}) {
     if (!isConnected) {
       return Future.error(const SocketException('Uburoom socket is not connected'));
     }
     final id = ++_seq;
     final completer = Completer<UburoomResponse>();
     _inflight[id] = completer;
-
-    final Map<String, dynamic> msg = {'type': 'request', 'id': id, 'path': path};
-    if (data != null) msg['data'] = data;
-
-    _sendRaw(msg);
-
+    _sendRaw({...message, 'id': id, 'timeoutMs': timeout.inMilliseconds});
     return completer.future.timeout(
-      const Duration(seconds: 10),
+      timeout + const Duration(seconds: 1),
       onTimeout: () {
         _inflight.remove(id);
-        throw TimeoutException('Request $path timed out', const Duration(seconds: 10));
+        _sendRaw({'type': 'cancel', 'id': id});
+        throw TimeoutException('Request ${message['type']} timed out', timeout);
       },
     );
+  }
+
+  /// Joins [roomId] as [viewerId] (or renews that tab's place: after a
+  /// reconnect, or to change `quality` or `delivery`). On success the response's
+  /// value is the tab's room snapshot, both lanes merged.
+  Future<UburoomResponse> join(
+    String roomId,
+    String viewerId, {
+    String? quality,
+    String? delivery,
+    Duration timeout = const Duration(seconds: 35),
+  }) async {
+    final response = await request({
+      'type': 'join',
+      'roomId': roomId,
+      'viewerId': viewerId,
+      'preferences': {'quality': ?quality, 'delivery': ?delivery},
+    }, timeout: timeout);
+    final value = response.value;
+    if (!response.isSuccess || value is! Map) return response;
+    final room = value['room'], viewer = value['viewer'];
+    if (room is! Map || viewer is! Map || room['state'] is! Map || viewer['state'] is! Map) {
+      return UburoomResponse(id: response.id, status: 502, value: const {'error': 'Invalid room state from uburoom.'});
+    }
+    _laneRoomId = roomId;
+    _laneViewerId = viewerId;
+    _roomLane = Map<String, dynamic>.from(room['state'] as Map);
+    _viewerLane = Map<String, dynamic>.from(viewer['state'] as Map);
+    _roomLaneVersion = (room['version'] as num?)?.toInt() ?? 0;
+    _viewerLaneVersion = (viewer['version'] as num?)?.toInt() ?? 0;
+    return UburoomResponse(id: response.id, status: 200, value: mergeLanes(_roomLane!, _viewerLane!));
+  }
+
+  /// Leaves [roomId].
+  Future<UburoomResponse> leave(String roomId, String viewerId) {
+    if (_laneRoomId == roomId) _forgetLanes();
+    return request({'type': 'leave', 'roomId': roomId, 'viewerId': viewerId});
+  }
+
+  /// Sends one room command, fenced by the room [epoch] this client last saw
+  /// and an [expiresAt] in server time.
+  Future<UburoomResponse> command(
+    String roomId, {
+    required String viewerId,
+    required String epoch,
+    required int expiresAt,
+    required String action,
+    Map<String, dynamic>? args,
+    Duration timeout = const Duration(seconds: 12),
+  }) => request({
+    'type': 'command',
+    'roomId': roomId,
+    'viewerId': viewerId,
+    'epoch': epoch,
+    'expiresAt': expiresAt,
+    'command': {'action': action, 'args': ?args},
+  }, timeout: timeout);
+
+  /// Reports whether this tab has buffered the room's current video.
+  Future<UburoomResponse> ready(
+    String roomId,
+    String viewerId, {
+    required String mediaVersion,
+    required bool ready,
+    Object? readinessVersion,
+  }) => request({
+    'type': 'ready',
+    'roomId': roomId,
+    'viewerId': viewerId,
+    'mediaVersion': mediaVersion,
+    'ready': ready,
+    'readinessVersion': ?readinessVersion,
+  });
+
+  /// Reports what the player actually decoded.
+  Future<UburoomResponse> observe(String roomId, String viewerId, Map<String, dynamic> observation) =>
+      request({'type': 'observe', 'roomId': roomId, 'viewerId': viewerId, 'observation': observation});
+
+  /// One named request (`CALLS` in uburoom's `shared/wire-protocol.js`), such as
+  /// `rooms.list`, `room.reopen` or `room.queue.command`.
+  Future<UburoomResponse> call(
+    String op, {
+    String? roomId,
+    Map<String, dynamic>? args,
+    Duration timeout = const Duration(seconds: 12),
+  }) => request({'type': 'call', 'op': op, 'roomId': ?roomId, 'args': ?args}, timeout: timeout);
+
+  /// Asks the server to send every lane again; completes once it has.
+  Future<UburoomResponse> resync() => request({'type': 'resync'});
+
+  /// A tab's view is its two lanes together. `volume` and `muted` belong to the
+  /// viewer lane and sit inside the view's `state`.
+  static Map<String, dynamic> mergeLanes(Map<String, dynamic> room, Map<String, dynamic> viewer) {
+    final own = Map<String, dynamic>.from(viewer)
+      ..remove('volume')
+      ..remove('muted');
+    final state = room['state'];
+    return {
+      ...room,
+      ...own,
+      'state': {
+        if (state is Map) ...Map<String, dynamic>.from(state),
+        'volume': viewer['volume'],
+        'muted': viewer['muted'],
+      },
+    };
+  }
+
+  void _forgetLanes() {
+    _laneRoomId = _laneViewerId = null;
+    _roomLane = _viewerLane = null;
+    _roomLaneVersion = _viewerLaneVersion = -1;
+  }
+
+  // One pushed lane. The snapshot is published once both lanes describe the same
+  // video, so a new video is never paired with the previous video's stream.
+  void _onLane(String type, Map<String, dynamic> json) {
+    final state = json['state'];
+    final version = (json['version'] as num?)?.toInt();
+    if (json['roomId'] != _laneRoomId || json['viewerId'] != _laneViewerId || state is! Map || version == null) return;
+    if (type == 'room') {
+      if (version < _roomLaneVersion) return;
+      _roomLaneVersion = version;
+      _roomLane = Map<String, dynamic>.from(state);
+    } else {
+      if (version < _viewerLaneVersion) return;
+      _viewerLaneVersion = version;
+      _viewerLane = Map<String, dynamic>.from(state);
+    }
+    final room = _roomLane, viewer = _viewerLane;
+    if (room == null || viewer == null || room['mediaVersion'] != viewer['mediaVersion']) return;
+    _roomStateController.add(UburoomRoomStatePush(roomId: _laneRoomId!, status: 200, value: mergeLanes(room, viewer)));
+  }
+
+  // An `error` with no request id is about the connection or the joined room.
+  void _onUnsolicitedError(Map<String, dynamic> json) {
+    final code = json['code'] as String? ?? '';
+    final status = (json['status'] as num?)?.toInt() ?? 500;
+    final message = json['message']?.toString() ?? 'Uburoom request failed ($status).';
+    final roomId = json['roomId'] as String?;
+    switch (code) {
+      case 'protocol':
+        _protocolError = UburoomProtocolException(message);
+        _explicitlyClosed = true;
+        if (_authCompleter != null && !_authCompleter!.isCompleted) _authCompleter!.completeError(_protocolError!);
+      case 'removed':
+        if (roomId != null) {
+          if (roomId == _laneRoomId) _forgetLanes();
+          _roomKickedController.add(roomId);
+        }
+      case 'room':
+        if (roomId == null) return;
+        final rejoin = json['rejoin'] == true;
+        if (rejoin && roomId == _laneRoomId) _forgetLanes();
+        _roomStateController.add(
+          UburoomRoomStatePush(roomId: roomId, status: status, value: {'error': message}, rejoin: rejoin),
+        );
+      default:
+        if (_state == UburoomConnectionState.authenticating && _authCompleter != null && !_authCompleter!.isCompleted) {
+          _authCompleter!.completeError(SocketException(message));
+        }
+        _unavailableController.add(UburoomUnavailable(code: code, status: status, message: message));
+    }
   }
 
   /// Sends sync-quality telemetry to the server.
@@ -220,7 +437,7 @@ class UburoomSocketService {
   }) {
     if (!isConnected) return;
     final Map<String, dynamic> msg = {
-      'type': 'sync-quality',
+      'type': 'quality',
       'roomId': roomId,
       'viewerId': viewerId,
       'mediaVersion': mediaVersion,
@@ -252,22 +469,9 @@ class UburoomSocketService {
       final type = json['type'] as String?;
 
       switch (type) {
-        case 'auth-ok':
+        case 'welcome':
           if (_authCompleter != null && !_authCompleter!.isCompleted) {
             _authCompleter!.complete();
-          }
-          break;
-        case 'auth-error':
-        case 'error':
-          if (_state == UburoomConnectionState.authenticating &&
-              _authCompleter != null &&
-              !_authCompleter!.isCompleted) {
-            final dynamic val = json['value'];
-            final errorMsg =
-                json['error'] ?? json['message'] ?? (val is Map ? val['error'] : null) ?? 'Authentication failed';
-            _authCompleter!.completeError(SocketException(errorMsg.toString()));
-          } else {
-            appLogger.w('UburoomSocketService: received $type: ${json['error'] ?? json['message']}');
           }
           break;
         case 'clock':
@@ -276,11 +480,11 @@ class UburoomSocketService {
             final sendAt = _clockSentAt.remove(id);
             if (sendAt != null) {
               final timing = json['timing'] as Map<String, dynamic>?;
-              final serverNow = json['serverNow'] as int? ?? DateTime.now().millisecondsSinceEpoch;
+              final serverNow = (json['serverNow'] as num?)?.toInt() ?? DateTime.now().millisecondsSinceEpoch;
               clockSync.addSample(
                 localSendAt: sendAt,
-                serverReceivedAt: timing?['serverReceivedAt'] as int? ?? serverNow,
-                serverSentAt: timing?['serverSentAt'] as int? ?? serverNow,
+                serverReceivedAt: (timing?['serverReceivedAt'] as num?)?.toInt() ?? serverNow,
+                serverSentAt: (timing?['serverSentAt'] as num?)?.toInt() ?? serverNow,
                 serverProcessingMs: (timing?['serverProcessingMs'] as num?)?.toDouble() ?? 0.0,
                 localReceiveAt: DateTime.now().millisecondsSinceEpoch,
                 clockEpoch: timing?['clockEpoch'] ?? 0,
@@ -288,36 +492,40 @@ class UburoomSocketService {
             }
           }
           break;
-        case 'response':
+        case 'ack':
           final id = json['id'] as int?;
           if (id != null) {
-            final completer = _inflight.remove(id);
-            completer?.complete(UburoomResponse(id: id, status: json['status'] as int? ?? 200, value: json['value']));
+            _inflight.remove(id)?.complete(UburoomResponse(id: id, status: 200, value: json['value']));
           }
           break;
-        case 'identity':
-          final val = json['value'];
-          if (val is Map<String, dynamic>) {
-            _identityController.add(val);
+        case 'error':
+          final id = json['id'] as int?;
+          if (id == null) {
+            _onUnsolicitedError(json);
+            break;
           }
+          _inflight
+              .remove(id)
+              ?.complete(
+                UburoomResponse(
+                  id: id,
+                  status: (json['status'] as num?)?.toInt() ?? 500,
+                  code: json['code'] as String?,
+                  value: {
+                    'error': json['message']?.toString() ?? 'Uburoom request failed.',
+                    'rejection': ?json['rejection'],
+                  },
+                ),
+              );
           break;
-        case 'rooms':
-          _roomsController.add(json['rooms'] ?? json['value']?['rooms']);
+        case 'lobby':
+          final identity = json['identity'];
+          if (identity is Map<String, dynamic>) _identityController.add(identity);
+          _roomsController.add(json['rooms']);
           break;
-        case 'state':
-          _roomStateController.add(
-            UburoomRoomStatePush(
-              path: json['path'] as String? ?? '',
-              status: json['status'] as int? ?? 200,
-              value: json['value'],
-            ),
-          );
-          break;
-        case 'room-kicked':
-          _roomKickedController.add(json['roomId'] as String? ?? '');
-          break;
-        case 'unavailable':
-          _unavailableController.add(json['value']);
+        case 'room':
+        case 'viewer':
+          _onLane(type!, json);
           break;
       }
     } catch (e, st) {
@@ -337,7 +545,7 @@ class UburoomSocketService {
 
   void _handleDisconnect() {
     _cleanupChannel();
-    if (!_explicitlyClosed && _serverUrl != null && _token != null) {
+    if (!_explicitlyClosed && _protocolError == null && _serverUrl != null && _token != null) {
       _scheduleReconnect();
     } else {
       _setState(UburoomConnectionState.disconnected);
@@ -352,7 +560,8 @@ class UburoomSocketService {
     final delaySeconds = math.min(10, 1 << math.min(4, _reconnectAttempts - 1));
     _reconnectTimer = Timer(Duration(seconds: delaySeconds), () {
       if (!_explicitlyClosed) {
-        unawaited(_performConnect());
+        // A protocol refusal ends the retries; whoever connects next hears of it.
+        unawaited(_performConnect().catchError((Object _) {}));
       }
     });
   }

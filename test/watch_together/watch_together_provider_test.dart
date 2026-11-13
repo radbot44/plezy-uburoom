@@ -1,3 +1,4 @@
+import 'uburoom_test_requests.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -44,7 +45,7 @@ class _UburoomSocket extends UburoomSocketService {
   final statePushController = StreamController<UburoomRoomStatePush>.broadcast();
   final connController = StreamController<UburoomConnectionState>.broadcast();
   final UburoomConnectionState _connState = UburoomConnectionState.connected;
-  UburoomResponse Function(String path, Map<String, dynamic>? data)? onSend;
+  UburoomResponse Function(String name, Map<String, dynamic>? data)? onSend;
 
   @override
   bool get isConnected => _connState == UburoomConnectionState.connected;
@@ -65,10 +66,16 @@ class _UburoomSocket extends UburoomSocketService {
   Stream<UburoomConnectionState> get connectionStateStream => connController.stream;
 
   @override
-  Future<UburoomResponse> sendRequest(String path, [Map<String, dynamic>? data]) async {
-    requests.add({'path': path, 'data': data});
+  Future<UburoomResponse> request(
+    Map<String, dynamic> message, {
+    Duration timeout = const Duration(seconds: 12),
+  }) async => framed(message, await answer(requestName(message), requestData(message)));
+
+  /// Answers one request by its name (see uburoom_test_requests.dart).
+  Future<UburoomResponse> answer(String name, [Map<String, dynamic>? data]) async {
+    requests.add({'request': name, 'data': data});
     if (onSend != null) {
-      return onSend!(path, data);
+      return onSend!(name, data);
     }
     return const UburoomResponse(id: 1, status: 200, value: {'ok': true});
   }
@@ -995,7 +1002,7 @@ void main() {
       await provider.skipToNextInUburoom();
 
       expect(socket.requests, hasLength(1));
-      expect(socket.requests.single['path'], '/api/watch/rooms/11111111-2222-3333-4444-555555555555/command');
+      expect(socket.requests.single['request'], 'command');
       final cmd = socket.requests.single['data'] as Map<String, dynamic>;
       expect(cmd['command']['action'], 'media.next');
     });
@@ -1010,8 +1017,8 @@ void main() {
       await provider.removeFromUburoomQueue('queue-item-42');
 
       expect(socket.requests, hasLength(1));
-      expect(socket.requests.single['path'], '/api/watch/rooms/11111111-2222-3333-4444-555555555555/queue');
-      expect(socket.requests.single['data'], {'action': 'remove', 'id': 'queue-item-42'});
+      expect(socket.requests.single['request'], 'room.queue.command');
+      expect(socket.requests.single['data'], {'action': 'remove', 'entryId': 'queue-item-42'});
     });
 
     test('setUburoomAutoQueue sends auto queue request', () async {
@@ -1022,14 +1029,14 @@ void main() {
       );
 
       await provider.setUburoomAutoQueue(true);
-      expect(socket.requests.last['path'], '/api/watch/rooms/11111111-2222-3333-4444-555555555555/queue');
-      expect(socket.requests.last['data'], {'action': 'auto', 'enabled': true});
+      expect(socket.requests.last['request'], 'room.queue.command');
+      expect(socket.requests.last['data'], {'action': 'auto', 'mode': 'continue', 'includeSpecials': false});
 
       await provider.setUburoomAutoQueue(false);
-      expect(socket.requests.last['data'], {'action': 'auto', 'enabled': false});
+      expect(socket.requests.last['data'], {'action': 'auto', 'mode': 'off', 'includeSpecials': false});
     });
 
-    test('reportUburoomDeliveryFailure reports failure and updates room snapshot', () async {
+    test('reportUburoomDeliveryFailure reports the failure; the new stream arrives as a push', () async {
       provider.setUburoomSessionForTest(
         roomId: '11111111-2222-3333-4444-555555555555',
         serverUrl: 'https://watch.example',
@@ -1054,35 +1061,26 @@ void main() {
 
       socket.requests.clear();
 
-      socket.onSend = (path, data) {
-        if (path == '/api/watch/rooms/11111111-2222-3333-4444-555555555555/delivery') {
-          return const UburoomResponse(
-            id: 2,
-            status: 200,
-            value: {
-              'id': '11111111-2222-3333-4444-555555555555',
-              'epoch': 'epoch-104',
-              'mediaId': 'plex-item-55',
-              'title': 'High Res Video (Fallback Transcode)',
-              'directDelivery': false,
-              'format': 'hls',
-              'mediaUrl': '/api/watch/media/fallback-grant/start',
-            },
-          );
-        }
-        return const UburoomResponse(id: 1, status: 200, value: {'ok': true});
-      };
-
       await provider.reportUburoomDeliveryFailure();
 
       expect(socket.requests, hasLength(1));
-      expect(socket.requests.single['path'], '/api/watch/rooms/11111111-2222-3333-4444-555555555555/delivery');
+      expect(socket.requests.single['request'], 'room.delivery');
       final payload = socket.requests.single['data'] as Map<String, dynamic>;
       expect(payload['viewerId'], provider.myPeerId);
       expect(payload['mediaVersion'], 'mv-direct-1');
       expect(payload['streamVersion'], 'sv-direct-1');
 
-      // The new snapshot was processed
+      // The answer is only an acknowledgement; it is never read as room state.
+      expect(provider.uburoomState?.directDelivery, isTrue);
+      await provider.handleUburoomSnapshotAsyncForTest({
+        'id': '11111111-2222-3333-4444-555555555555',
+        'epoch': 'epoch-104',
+        'mediaId': 'plex-item-55',
+        'title': 'High Res Video (Fallback Transcode)',
+        'directDelivery': false,
+        'format': 'hls',
+        'mediaUrl': '/api/watch/media/fallback-grant/start',
+      });
       expect(provider.uburoomState?.directDelivery, isFalse);
       expect(provider.roomCopy, isNotNull);
       final raw = provider.roomCopy!.ref.item!.raw!;
@@ -1090,7 +1088,7 @@ void main() {
       expect(raw['uburoomIsTranscoding'], isTrue);
     });
 
-    test('setUburoomQuality updates uburoomQuality and re-requests room snapshot with quality param', () async {
+    test('setUburoomQuality updates uburoomQuality and sends the personal quality command', () async {
       expect(provider.uburoomQuality, 'direct');
 
       // Changing quality outside session updates getter without sending requests
@@ -1105,35 +1103,15 @@ void main() {
         token: 'fixture-token-64hex',
       );
 
-      socket.onSend = (path, data) {
-        if (path.startsWith('/api/watch/rooms/11111111-2222-3333-4444-555555555555?')) {
-          return const UburoomResponse(
-            id: 2,
-            status: 200,
-            value: {
-              'id': '11111111-2222-3333-4444-555555555555',
-              'epoch': 'epoch-106',
-              'mediaId': 'plex-item-88',
-              'title': 'Quality Test Movie',
-              'format': 'hls',
-              'mediaUrl': '/api/watch/media/token-1080p/start',
-            },
-          );
-        }
-        return const UburoomResponse(id: 1, status: 200, value: {'ok': true});
-      };
-
       await provider.setUburoomQuality('1080p-10mbps');
       expect(provider.uburoomQuality, '1080p-10mbps');
 
       expect(socket.requests, hasLength(1));
-      expect(
-        socket.requests.single['path'],
-        '/api/watch/rooms/11111111-2222-3333-4444-555555555555?viewer=${provider.viewerId}&quality=1080p-10mbps&delivery=auto',
-      );
-      expect(provider.roomCopy, isNotNull);
-      final raw = provider.roomCopy!.ref.item!.raw!;
-      expect(raw['uburoomMediaUrl'], 'https://watch.example/api/watch/media/token-1080p/start');
+      expect(socket.requests.single['request'], 'command');
+      expect((socket.requests.single['data'] as Map)['command'], {
+        'action': 'media.quality.set',
+        'args': {'quality': '1080p-10mbps'},
+      });
     });
 
     test(
@@ -1143,6 +1121,12 @@ void main() {
           roomId: '11111111-2222-3333-4444-555555555555',
           serverUrl: 'https://watch.example',
           token: 'fixture-token-64hex',
+        );
+
+        socket.onSend = (name, data) => UburoomResponse(
+          id: 1,
+          status: 200,
+          value: name == 'room.settings' ? const {'revision': 7} : const {'status': 'applied'},
         );
 
         // 1. Unauthorized: normal viewer (isHost: false, canManage: false) -> no-ops
@@ -1166,13 +1150,21 @@ void main() {
 
         await provider.kickUburoomParticipant('target-user-1');
         expect(socket.requests, hasLength(1));
-        expect(socket.requests.last['path'], '/api/watch/rooms/11111111-2222-3333-4444-555555555555/people');
-        expect(socket.requests.last['data'], {'action': 'kick', 'userId': 'target-user-1'});
+        expect(socket.requests.last['request'], 'command');
+        expect((socket.requests.last['data'] as Map)['command'], {
+          'action': 'room.kick',
+          'args': {'userId': 'target-user-1'},
+        });
 
         await provider.setUburoomParticipantRole('target-user-2', 'host');
-        expect(socket.requests, hasLength(2));
-        expect(socket.requests.last['path'], '/api/watch/rooms/11111111-2222-3333-4444-555555555555/people');
-        expect(socket.requests.last['data'], {'action': 'role', 'userId': 'target-user-2', 'role': 'host'});
+        // A role is a room setting: read its revision, then edit at that revision.
+        expect(socket.requests, hasLength(3));
+        expect(socket.requests[1]['request'], 'room.settings');
+        expect(socket.requests.last['request'], 'room.settings.edit');
+        expect(socket.requests.last['data'], {
+          'revision': 7,
+          'change': {'action': 'host.add', 'userId': 'target-user-2'},
+        });
 
         // 3. Authorized via canManage: true (when isHost: false)
         socket.requests.clear();
@@ -1186,13 +1178,19 @@ void main() {
 
         await provider.kickUburoomParticipant('target-user-3');
         expect(socket.requests, hasLength(1));
-        expect(socket.requests.last['path'], '/api/watch/rooms/11111111-2222-3333-4444-555555555555/people');
-        expect(socket.requests.last['data'], {'action': 'kick', 'userId': 'target-user-3'});
+        expect(socket.requests.last['request'], 'command');
+        expect((socket.requests.last['data'] as Map)['command'], {
+          'action': 'room.kick',
+          'args': {'userId': 'target-user-3'},
+        });
 
         await provider.setUburoomParticipantRole('target-user-3', 'viewer');
-        expect(socket.requests, hasLength(2));
-        expect(socket.requests.last['path'], '/api/watch/rooms/11111111-2222-3333-4444-555555555555/people');
-        expect(socket.requests.last['data'], {'action': 'role', 'userId': 'target-user-3', 'role': 'viewer'});
+        expect(socket.requests, hasLength(3));
+        expect(socket.requests.last['request'], 'room.settings.edit');
+        expect(socket.requests.last['data'], {
+          'revision': 7,
+          'change': {'action': 'host.remove', 'userId': 'target-user-3'},
+        });
       },
     );
   });

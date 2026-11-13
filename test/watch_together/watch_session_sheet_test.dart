@@ -1,3 +1,4 @@
+import 'uburoom_test_requests.dart';
 import 'dart:async';
 import 'dart:io';
 
@@ -803,9 +804,7 @@ void main() {
 
       expect(
         socket.sentRequests.any(
-          (req) =>
-              req['path'] == '/api/watch/rooms/room-ubu-queue-ops/command' &&
-              (req['data'] as Map?)?['command']?['action'] == 'media.next',
+          (req) => req['request'] == 'command' && (req['data'] as Map?)?['command']?['action'] == 'media.next',
         ),
         isTrue,
         reason: 'tapping Next should dispatch media.next command',
@@ -819,9 +818,9 @@ void main() {
       expect(
         socket.sentRequests.any(
           (req) =>
-              req['path'] == '/api/watch/rooms/room-ubu-queue-ops/queue' &&
+              req['request'] == 'room.queue.command' &&
               (req['data'] as Map?)?['action'] == 'remove' &&
-              (req['data'] as Map?)?['id'] == 'q-ops-1',
+              (req['data'] as Map?)?['entryId'] == 'q-ops-1',
         ),
         isTrue,
         reason: 'tapping Remove from queue should dispatch remove action for item',
@@ -833,12 +832,12 @@ void main() {
       expect(
         socket.sentRequests.any(
           (req) =>
-              req['path'] == '/api/watch/rooms/room-ubu-queue-ops/queue' &&
+              req['request'] == 'room.queue.command' &&
               (req['data'] as Map?)?['action'] == 'auto' &&
-              (req['data'] as Map?)?['enabled'] == false,
+              (req['data'] as Map?)?['mode'] == 'off',
         ),
         isTrue,
-        reason: 'tapping Auto-queue should dispatch queue auto action with enabled: false',
+        reason: 'tapping Auto-queue should turn the auto-queue off',
       );
     });
   });
@@ -879,9 +878,15 @@ class _TestUburoomSocket extends UburoomSocketService {
   String get token => 'test-bearer-token-64hex';
 
   @override
-  Future<UburoomResponse> sendRequest(String path, [Map<String, dynamic>? data]) async {
-    sentRequests.add({'path': path, 'data': data});
-    if (path.contains('/api/watch/rooms/') && currentSnapshot.isNotEmpty) {
+  Future<UburoomResponse> request(
+    Map<String, dynamic> message, {
+    Duration timeout = const Duration(seconds: 12),
+  }) async => framed(message, await answer(requestName(message), requestData(message)));
+
+  /// Answers one request by its name (see uburoom_test_requests.dart).
+  Future<UburoomResponse> answer(String name, [Map<String, dynamic>? data]) async {
+    sentRequests.add({'request': name, 'data': data});
+    if (name == 'join' && currentSnapshot.isNotEmpty) {
       return UburoomResponse(id: 1, status: 200, value: currentSnapshot);
     }
     return const UburoomResponse(id: 1, status: 200, value: {'ok': true});

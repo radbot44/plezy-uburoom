@@ -207,7 +207,7 @@ class GuestPlaybackReconciler {
 
   void _onRoomStatePush(UburoomRoomStatePush push) {
     if (_disposed) return;
-    if (push.path.startsWith('/api/watch/rooms/$roomId') && push.value is Map<String, dynamic>) {
+    if (push.roomId == roomId && push.isSuccess && push.value is Map<String, dynamic>) {
       updateRoomSnapshot(push.value as Map<String, dynamic>);
     }
   }
@@ -273,12 +273,13 @@ class GuestPlaybackReconciler {
 
   Future<void> _sendReady() async {
     try {
-      final res = await socketService.sendRequest('/api/watch/rooms/$roomId/ready', {
-        'viewerId': viewerId,
-        'mediaVersion': _mediaVersion,
-        'ready': true,
-        if (_readinessVersion != null) 'readinessVersion': _readinessVersion,
-      });
+      final res = await socketService.ready(
+        roomId,
+        viewerId,
+        mediaVersion: _mediaVersion,
+        ready: true,
+        readinessVersion: _readinessVersion,
+      );
       if (!res.isSuccess) {
         _readySentForCurrentVersion = false;
         appLogger.w('GuestPlaybackReconciler: sendReady returned status ${res.status}: ${res.value}');
@@ -554,7 +555,6 @@ class GuestPlaybackReconciler {
     final sequence = ++_observationSequence;
 
     final data = <String, dynamic>{
-      'viewerId': viewerId,
       'epoch': _epoch,
       'mediaVersion': _mediaVersion,
       'streamVersion': _streamVersion,
@@ -572,7 +572,7 @@ class GuestPlaybackReconciler {
     _observationPending = true;
     unawaited(
       socketService
-          .sendRequest('/api/watch/rooms/$roomId/observe', data)
+          .observe(roomId, viewerId, data)
           .then((response) {
             if (response.status == 409) {
               _observationSequence = 0;

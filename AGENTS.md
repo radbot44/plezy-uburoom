@@ -14,11 +14,11 @@
 2. **Downloaded Files in Watch Rooms (`delivery=local`)**:
    - Upstream Plezy conflates offline library mode (`_offlineLibraryMode`) with local file playback (`_effectiveIsOffline` / `PlaybackSourceKind.localFile`) via `_isOfflinePlayback`, which disables Watch Together when a downloaded file is opened (`lib/screens/video_player_screen.dart:1064`, `lib/screens/video_player/parts/watch_together.dart:6-12`, `lib/screens/video_player/parts/playback_start.dart:326`).
    - In `plezy-uburoom`, separate **network availability** (`!_offlineLibraryMode`) from **media source location** (`_usesLocalPlaybackSource` / `PlaybackSourceKind.localFile`).
-   - When an uburoom session is active and a matching downloaded copy exists (`resolveDownloadedVideoSource` in `lib/services/downloaded_video_source.dart`), open the local file in `libmpv`, attach `AttachedPlayer` to the uburoom session, and subscribe to `/api/watch/rooms/:id?viewer=...&delivery=local` so the uburoom server skips upstream HLS/proxy allocation while retaining readiness gates, clock sync, and `observe` reporting.
+   - When an uburoom session is active and a matching downloaded copy exists (`resolveDownloadedVideoSource` in `lib/services/downloaded_video_source.dart`), open the local file in `libmpv`, attach `AttachedPlayer` to the uburoom session, and join the room with `delivery: local` so the uburoom server skips upstream HLS/proxy allocation while retaining readiness gates, clock sync, and `observe` reporting.
    - When no local download exists (or when the viewer is a sponsored guest without personal Plex access), open uburoom's authorized `state.mediaUrl` (`/api/watch/media/:grant/start`) or `state.directHls` stream in `libmpv`.
 3. **Server-Authoritative Timeline & Reporting**:
    - Uburoom's server owns the room timeline (`epoch`, `revision`, `mediaVersion`, `streamVersion`, `startAt`, `pauseAt`, `serverNow`, `waitingForReady`). Every `plezy-uburoom` client acts as a synchronized room viewer rather than running P2P host heartbeats (`HostPlaybackCoordinator`).
-   - While in an active uburoom room, suppress duplicate direct-to-PMS `/:/timeline` reporting in Plezy (`PlaybackReportingMode`) and route decoded playback observations through uburoom's `/api/watch/rooms/:id/observe` endpoint so `server/plex-reporting.js` enforces shared-producer safety and personal watch-state opt-in rules.
+   - While in an active uburoom room, suppress duplicate direct-to-PMS `/:/timeline` reporting in Plezy (`PlaybackReportingMode`) and route decoded playback observations through uburoom's `observe` message so `server/plex-reporting.js` enforces shared-producer safety and personal watch-state opt-in rules.
 
 ## Code quality and verification
 

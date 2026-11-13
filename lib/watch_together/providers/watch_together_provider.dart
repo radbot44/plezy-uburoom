@@ -487,7 +487,7 @@ class WatchTogetherProvider extends ChangeNotifier {
       unawaited(_uburoomKickSub?.cancel());
       _uburoomKickSub = null;
       if (roomId != null && socket != null && socket.isConnected) {
-        unawaited(socket.sendRequest('/api/watch/rooms/$roomId/leave', {'viewerId': _viewerId}));
+        unawaited(socket.leave(roomId, _viewerId).catchError((Object _) => const UburoomResponse(id: 0, status: 503)));
       }
       _uburoomRoomId = null;
       _uburoomServerUrl = null;
@@ -511,9 +511,9 @@ class WatchTogetherProvider extends ChangeNotifier {
       final socket = _socketService;
       if (roomId != null && socket != null && socket.isConnected) {
         unawaited(
-          socket.sendRequest('/api/watch/rooms/$roomId/close', {
-            'epoch': _uburoomEpoch ?? (_uburoomState?.epoch ?? ''),
-          }),
+          socket
+              .call('room.close', roomId: roomId, args: {'epoch': _uburoomEpoch ?? (_uburoomState?.epoch ?? '')})
+              .catchError((Object _) => const UburoomResponse(id: 0, status: 503)),
         );
       }
       leave();
@@ -1120,7 +1120,7 @@ class WatchTogetherProvider extends ChangeNotifier {
     final durationSeconds = (item.durationMs != null && item.durationMs! > 0) ? (item.durationMs! / 1000.0) : 1.0;
     try {
       if (_uburoomState?.durable == true) {
-        final res = await socket.sendRequest('/api/watch/rooms/$roomId/queue', {
+        final res = await _queueCommand(socket, roomId, {
           'action': 'playNow',
           'item': {
             'serverId': item.serverId ?? '',
@@ -1145,7 +1145,7 @@ class WatchTogetherProvider extends ChangeNotifier {
     if (roomId == null || socket == null || !socket.isConnected) return;
     final durationSeconds = (item.durationMs != null && item.durationMs! > 0) ? (item.durationMs! / 1000.0) : 1.0;
     try {
-      await socket.sendRequest('/api/watch/rooms/$roomId/queue', {
+      await _queueCommand(socket, roomId, {
         'action': 'add',
         'item': {
           'serverId': item.serverId ?? '',
@@ -1174,7 +1174,7 @@ class WatchTogetherProvider extends ChangeNotifier {
     final socket = _socketService;
     if (roomId == null || socket == null || !socket.isConnected) return;
     try {
-      await socket.sendRequest('/api/watch/rooms/$roomId/queue', {'action': 'remove', 'id': itemId});
+      await _queueCommand(socket, roomId, {'action': 'remove', 'entryId': itemId});
     } catch (e) {
       appLogger.w('WatchTogether: removeFromUburoomQueue failed: $e');
     }
@@ -1187,7 +1187,12 @@ class WatchTogetherProvider extends ChangeNotifier {
     final socket = _socketService;
     if (roomId == null || socket == null || !socket.isConnected) return;
     try {
-      await socket.sendRequest('/api/watch/rooms/$roomId/queue', {'action': 'auto', 'enabled': enabled});
+      // The server's auto-queue is a mode: `continue` keeps going from the current title.
+      await _queueCommand(socket, roomId, {
+        'action': 'auto',
+        'mode': enabled ? 'continue' : 'off',
+        'includeSpecials': false,
+      });
     } catch (e) {
       appLogger.w('WatchTogether: setUburoomAutoQueue failed: $e');
     }
@@ -1201,50 +1206,35 @@ class WatchTogetherProvider extends ChangeNotifier {
     final socket = _socketService;
     if (roomId == null || socket == null || !socket.isConnected) return;
     try {
-      final res = await socket.sendRequest('/api/watch/rooms/$roomId/delivery', {
-        'viewerId': _viewerId,
-        'mediaVersion': _uburoomState?.mediaVersion,
-        'streamVersion': _uburoomState?.streamVersion,
-      });
-      if (res.isSuccess && res.value is Map) {
-        await _handleUburoomSnapshot(
-          res.value is Map<String, dynamic>
-              ? res.value as Map<String, dynamic>
-              : Map<String, dynamic>.from(res.value as Map),
-        );
-      }
+      // The server prepares the other delivery and pushes the new stream.
+      final res = await socket.call(
+        'room.delivery',
+        roomId: roomId,
+        args: {
+          'viewerId': _viewerId,
+          'mediaVersion': _uburoomState?.mediaVersion,
+          'streamVersion': _uburoomState?.streamVersion,
+        },
+      );
+      if (!res.isSuccess) appLogger.w('WatchTogether: delivery fallback refused: ${res.error}');
     } catch (e) {
       appLogger.w('WatchTogether: reportUburoomDeliveryFailure failed: $e');
     }
   }
 
-  /// Sets the stream quality for the current uburoom viewer and re-requests the room snapshot.
+  /// Sets this viewer's stream quality. It is a personal room command; the
+  /// server prepares the new stream and pushes it.
   Future<void> setUburoomQuality(String quality) async {
     _uburoomQuality = quality;
     notifyListeners();
-    if (isUburoomSession && _socketService != null && _socketService!.isConnected && _uburoomRoomId != null) {
-      try {
-        final res = await _socketService!.sendRequest(
-          '/api/watch/rooms/$_uburoomRoomId?viewer=$_viewerId&quality=$_uburoomQuality&delivery=$_uburoomDelivery',
-        );
-        await _handleUburoomSnapshot(_uburoomValue(res));
-      } catch (e) {
-        appLogger.w('WatchTogether: setUburoomQuality failed: $e');
-      }
-    }
+    if (isUburoomSession) await _sendUburoomCommand('media.quality.set', {'quality': quality});
   }
 
   /// Kicks a participant from the uburoom room when host or manager.
   Future<void> kickUburoomParticipant(String userId) async {
     if (!isUburoomSession || !(isHost || (_uburoomState?.canManage ?? false))) return;
-    final roomId = _uburoomRoomId;
-    final socket = _socketService;
-    if (roomId == null || socket == null || !socket.isConnected) return;
-    try {
-      await socket.sendRequest('/api/watch/rooms/$roomId/people', {'action': 'kick', 'userId': userId});
-    } catch (e) {
-      appLogger.w('WatchTogether: kickUburoomParticipant failed: $e');
-    }
+    // Removing someone is a room command, like any other control.
+    await _sendUburoomCommand('room.kick', {'userId': userId});
   }
 
   /// Sets a participant's role in the uburoom room when host or manager.
@@ -1254,10 +1244,32 @@ class WatchTogetherProvider extends ChangeNotifier {
     final socket = _socketService;
     if (roomId == null || socket == null || !socket.isConnected) return;
     try {
-      await socket.sendRequest('/api/watch/rooms/$roomId/people', {'action': 'role', 'userId': userId, 'role': role});
+      // Roles are room settings, changed at the revision this client last read.
+      final settings = _uburoomValue(await socket.call('room.settings', roomId: roomId));
+      final res = await socket.call(
+        'room.settings.edit',
+        roomId: roomId,
+        args: {
+          'revision': settings['revision'],
+          'change': {'action': role == 'host' ? 'host.add' : 'host.remove', 'userId': userId},
+        },
+      );
+      if (!res.isSuccess) appLogger.w('WatchTogether: role change refused: ${res.error}');
     } catch (e) {
       appLogger.w('WatchTogether: setUburoomParticipantRole failed: $e');
     }
+  }
+
+  // One change to the room's durable queue, through the server's command engine.
+  Future<UburoomResponse> _queueCommand(UburoomSocketService socket, String roomId, Map<String, dynamic> args) async {
+    final res = await socket.call(
+      'room.queue.command',
+      roomId: roomId,
+      args: args,
+      timeout: const Duration(seconds: 35),
+    );
+    if (!res.isSuccess) appLogger.w('WatchTogether: queue ${args['action']} refused: ${res.error}');
+    return res;
   }
 
   Future<void> _sendUburoomCommand(String action, [Map<String, dynamic>? args]) async {
@@ -1265,14 +1277,18 @@ class WatchTogetherProvider extends ChangeNotifier {
     final socket = _socketService;
     if (roomId == null || socket == null || !socket.isConnected) return;
     try {
-      final res = await socket.sendRequest('/api/watch/rooms/$roomId/command', {
-        'epoch': _uburoomEpoch ?? (_uburoomState?.epoch ?? ''),
-        'expiresAt': _clockSync.serverNow + 2500,
-        'viewerId': _viewerId,
-        'command': {'action': action, 'args': ?args},
-      });
+      final res = await socket.command(
+        roomId,
+        viewerId: _viewerId,
+        epoch: _uburoomEpoch ?? (_uburoomState?.epoch ?? ''),
+        expiresAt: _clockSync.serverNow + 2500,
+        action: action,
+        args: args,
+      );
       final body = res.value;
-      if (body is Map && body['status'] != null && body['status'] != 'applied') {
+      if (!res.isSuccess) {
+        appLogger.w('WatchTogether: uburoom command $action refused (${res.status}): ${res.error}');
+      } else if (body is Map && body['status'] != null && body['status'] != 'applied') {
         appLogger.w('WatchTogether: uburoom command $action rejected: ${body['status']} ${body['message'] ?? ''}');
       }
     } catch (e) {
@@ -1301,8 +1317,14 @@ class WatchTogetherProvider extends ChangeNotifier {
     }
     final socket = _socketService ??= UburoomSocketService(clockSync: _clockSync);
     if (!socket.isConnected || socket.serverUrl != serverUrl || socket.token != token) {
-      await socket.connect(serverUrl: serverUrl, token: token);
+      try {
+        await socket.connect(serverUrl: serverUrl, token: token);
+      } on UburoomProtocolException catch (e) {
+        // The server and this app speak different protocol versions; say so in the server's words.
+        throw UburoomRoomException(e.message);
+      }
     }
+    if (socket.protocolError != null) throw UburoomRoomException(socket.protocolError!.message);
     if (!socket.isConnected) {
       throw const UburoomRoomException('Could not connect to uburoom. Check the server address and sign in again.');
     }
@@ -1323,7 +1345,7 @@ class WatchTogetherProvider extends ChangeNotifier {
 
   Future<List<Map<String, dynamic>>> listUburoomRooms() async {
     final socket = await _connectUburoom();
-    final active = _uburoomValue(await socket.sendRequest('/api/watch/rooms'));
+    final active = _uburoomValue(await socket.call('rooms.list'));
     final rooms = <String, Map<String, dynamic>>{};
     for (final room in (active['rooms'] as List? ?? const [])) {
       if (room is Map<String, dynamic> && room['locked'] != true) {
@@ -1332,7 +1354,7 @@ class WatchTogetherProvider extends ChangeNotifier {
     }
     var offset = 0;
     while (true) {
-      final saved = _uburoomValue(await socket.sendRequest('/api/watch/rooms/saved?offset=$offset'));
+      final saved = _uburoomValue(await socket.call('rooms.saved', args: {'offset': offset}));
       final page = saved['rooms'] as List? ?? const [];
       for (final room in page.whereType<Map<String, dynamic>>()) {
         rooms.putIfAbsent(room['id'] as String, () => room);
@@ -1347,7 +1369,7 @@ class WatchTogetherProvider extends ChangeNotifier {
     final id = room['id'] as String;
     if (room['active'] == false) {
       final socket = await _connectUburoom();
-      _uburoomValue(await socket.sendRequest('/api/watch/rooms/$id/reopen', {}));
+      _uburoomValue(await socket.call('room.reopen', roomId: id, timeout: const Duration(seconds: 35)));
     }
     await _joinUburoomRoom(id);
   }
@@ -1357,10 +1379,13 @@ class WatchTogetherProvider extends ChangeNotifier {
 
     final socket = await _connectUburoom();
     final value = _uburoomValue(
-      await socket.sendRequest('/api/watch/rooms', {
-        'name': name?.trim().isNotEmpty == true ? name!.trim() : _sanitizedName(_displayName()),
-        'visibility': 'public',
-      }),
+      await socket.call(
+        'rooms.create',
+        args: {
+          'name': name?.trim().isNotEmpty == true ? name!.trim() : _sanitizedName(_displayName()),
+          'visibility': 'public',
+        },
+      ),
     );
     final roomId = value['id'] as String?;
     if (roomId == null || roomId.isEmpty) throw const UburoomRoomException('Uburoom did not return a room ID.');
@@ -1384,9 +1409,7 @@ class WatchTogetherProvider extends ChangeNotifier {
     _uburoomConnSub = socket.connectionStateStream.listen(_onUburoomConnectionStateChanged);
 
     _uburoomDelivery = 'auto';
-    final res = await socket.sendRequest(
-      '/api/watch/rooms/$roomId?viewer=$_viewerId&quality=$_uburoomQuality&delivery=$_uburoomDelivery',
-    );
+    final res = await socket.join(roomId, _viewerId, quality: _uburoomQuality, delivery: _uburoomDelivery);
     final snapshot = _uburoomValue(res);
 
     _uburoomRoomId = roomId;
@@ -1415,10 +1438,17 @@ class WatchTogetherProvider extends ChangeNotifier {
   }
 
   void _onUburoomStatePush(UburoomRoomStatePush push) {
-    if (_disposed || !isUburoomSession) return;
-    if (push.path.startsWith('/api/watch/rooms/$_uburoomRoomId') && push.value is Map<String, dynamic>) {
-      unawaited(_handleUburoomSnapshot(push.value as Map<String, dynamic>));
+    if (_disposed || !isUburoomSession || push.roomId != _uburoomRoomId) return;
+    if (push.isSuccess) {
+      if (push.value is Map<String, dynamic>) unawaited(_handleUburoomSnapshot(push.value as Map<String, dynamic>));
+      return;
     }
+    // The room refused this viewer its state: it went private, access was revoked,
+    // or the room let a silent tab go ("join again"). The server never lets a tab
+    // back in by itself, so the session ends here and the lobby offers the room again.
+    appLogger.i('Uburoom: room state refused (${push.status}${push.rejoin ? ', join again' : ''}): ${push.error}');
+    _notify(const EndedNotice(owp.EndReason.lost));
+    leave();
   }
 
   void _onUburoomRoomKicked(String roomId) {
@@ -1436,13 +1466,19 @@ class WatchTogetherProvider extends ChangeNotifier {
       if (roomId != null && socket != null && socket.isConnected) {
         unawaited(() async {
           try {
-            final res = await socket.sendRequest(
-              '/api/watch/rooms/$roomId?viewer=$_viewerId&quality=$_uburoomQuality&delivery=$_uburoomDelivery',
-            );
-            final snapshot = _uburoomValue(res);
-            await _handleUburoomSnapshot(snapshot);
+            // A new connection holds no room: this tab joins again as the same viewer.
+            final res = await socket.join(roomId, _viewerId, quality: _uburoomQuality, delivery: _uburoomDelivery);
+            if (_uburoomRoomId != roomId) return;
+            if (!res.isSuccess && res.status >= 400 && res.status < 500) {
+              // The room is gone, private or full now; it cannot be resumed.
+              appLogger.i('Uburoom: rejoin after reconnect refused (${res.status}): ${res.error}');
+              _notify(const EndedNotice(owp.EndReason.lost));
+              leave();
+              return;
+            }
+            await _handleUburoomSnapshot(_uburoomValue(res));
           } catch (e) {
-            appLogger.w('Uburoom: error resubscribing after reconnect', error: e);
+            appLogger.w('Uburoom: error rejoining after reconnect', error: e);
           }
         }());
       }
@@ -1545,8 +1581,11 @@ class WatchTogetherProvider extends ChangeNotifier {
           final socket = _socketService;
           final roomId = _uburoomRoomId;
           if (socket != null && socket.isConnected && roomId != null) {
+            // Joining again as the same viewer changes how the server delivers to it.
             unawaited(
-              socket.sendRequest('/api/watch/rooms/$roomId?viewer=$_viewerId&quality=$_uburoomQuality&delivery=local'),
+              socket
+                  .join(roomId, _viewerId, quality: _uburoomQuality, delivery: 'local')
+                  .catchError((Object _) => const UburoomResponse(id: 0, status: 503)),
             );
           }
         }
@@ -1558,9 +1597,7 @@ class WatchTogetherProvider extends ChangeNotifier {
           final roomId = _uburoomRoomId;
           if (socket != null && socket.isConnected && roomId != null) {
             try {
-              final res = await socket.sendRequest(
-                '/api/watch/rooms/$roomId?viewer=$_viewerId&quality=$_uburoomQuality&delivery=auto',
-              );
+              final res = await socket.join(roomId, _viewerId, quality: _uburoomQuality, delivery: 'auto');
               effectiveSnapshot = _uburoomValue(res);
               _lastUburoomSnapshot = effectiveSnapshot;
               _uburoomState = UburoomRoomState.fromSnapshot(effectiveSnapshot, deliveryMode: _uburoomDelivery);

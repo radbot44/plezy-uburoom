@@ -1,3 +1,4 @@
+import 'uburoom_test_requests.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -826,10 +827,7 @@ void main() {
       expect(pauseButton, findsOneWidget);
       await tester.tap(pauseButton);
       await tester.pump();
-      expect(
-        socket.requests.any((r) => r.$1.endsWith('/command') && r.$2?['command']?['action'] == 'media.pause'),
-        isTrue,
-      );
+      expect(socket.requests.any((r) => r.$1 == 'command' && r.$2?['command']?['action'] == 'media.pause'), isTrue);
 
       // Stop button for host
       final stopButton = find.widgetWithText(OutlinedButton, 'Stop');
@@ -839,10 +837,7 @@ void main() {
       await tester.tap(stopButton);
       await tester.pump();
       // Durable room sends queue.clear
-      expect(
-        socket.requests.any((r) => r.$1.endsWith('/command') && r.$2?['command']?['action'] == 'queue.clear'),
-        isTrue,
-      );
+      expect(socket.requests.any((r) => r.$1 == 'command' && r.$2?['command']?['action'] == 'queue.clear'), isTrue);
 
       // Participant list verification
       expect(find.text('Participants (2)'), findsOneWidget);
@@ -903,10 +898,7 @@ void main() {
       expect(playButton, findsOneWidget);
       await tester.tap(playButton);
       await tester.pump();
-      expect(
-        socket.requests.any((r) => r.$1.endsWith('/command') && r.$2?['command']?['action'] == 'media.play'),
-        isTrue,
-      );
+      expect(socket.requests.any((r) => r.$1 == 'command' && r.$2?['command']?['action'] == 'media.play'), isTrue);
 
       // Stop button is NOT shown for guest
       expect(find.widgetWithText(OutlinedButton, 'Stop'), findsNothing);
@@ -961,7 +953,7 @@ void main() {
       // Tapping a saved room triggers reopen then join
       await tester.tap(find.text('Anime Club'));
       await tester.pumpAndSettle();
-      expect(socket.requests.any((r) => r.$1 == '/api/watch/rooms/room-beta-456/reopen'), isTrue);
+      expect(socket.requests.any((r) => r.$1 == 'room.reopen'), isTrue);
     });
 
     testWidgets('UburoomRoomView displays Queue card with items, Auto-queue badge, and Private visibility badge', (
@@ -1157,11 +1149,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        socket.requests.any(
-          (r) =>
-              r.$1 == '/api/watch/rooms/uburoom-room-queue-test/command' &&
-              (r.$2?['command'] as Map?)?['action'] == 'media.next',
-        ),
+        socket.requests.any((r) => r.$1 == 'command' && (r.$2?['command'] as Map?)?['action'] == 'media.next'),
         isTrue,
       );
     });
@@ -1216,10 +1204,7 @@ void main() {
 
       expect(
         socket.requests.any(
-          (r) =>
-              r.$1 == '/api/watch/rooms/uburoom-room-queue-test/queue' &&
-              r.$2?['action'] == 'remove' &&
-              r.$2?['id'] == 'q-remove-1',
+          (r) => r.$1 == 'room.queue.command' && r.$2?['action'] == 'remove' && r.$2?['entryId'] == 'q-remove-1',
         ),
         isTrue,
       );
@@ -1274,10 +1259,7 @@ void main() {
 
       expect(
         socket.requests.any(
-          (r) =>
-              r.$1 == '/api/watch/rooms/uburoom-room-queue-test/queue' &&
-              r.$2?['action'] == 'auto' &&
-              r.$2?['enabled'] == false,
+          (r) => r.$1 == 'room.queue.command' && r.$2?['action'] == 'auto' && r.$2?['mode'] == 'off',
         ),
         isTrue,
       );
@@ -1312,19 +1294,25 @@ class _TestUburoomSocketService extends UburoomSocketService {
   String get token => 'mock-token';
 
   @override
-  Future<UburoomResponse> sendRequest(String path, [Map<String, dynamic>? data]) async {
-    requests.add((path, data));
-    if (path == '/api/watch/rooms' && data == null) {
+  Future<UburoomResponse> request(
+    Map<String, dynamic> message, {
+    Duration timeout = const Duration(seconds: 12),
+  }) async => framed(message, await answer(requestName(message), requestData(message)));
+
+  /// Answers one request by its name (see uburoom_test_requests.dart).
+  Future<UburoomResponse> answer(String name, [Map<String, dynamic>? data]) async {
+    requests.add((name, data));
+    if (name == 'rooms.list') {
       return UburoomResponse(id: requests.length, status: 200, value: {'rooms': roomsToReturn});
     }
-    if (path.startsWith('/api/watch/rooms/saved')) {
+    if (name == 'rooms.saved') {
       return UburoomResponse(
         id: requests.length,
         status: 200,
         value: {'rooms': savedRoomsToReturn, 'total': savedRoomsToReturn.length},
       );
     }
-    if (path.startsWith('/api/watch/rooms/') && path.contains('?')) {
+    if (name == 'join') {
       return UburoomResponse(
         id: requests.length,
         status: 200,
@@ -1338,7 +1326,7 @@ class _TestUburoomSocketService extends UburoomSocketService {
             },
       );
     }
-    if (path.endsWith('/reopen')) {
+    if (name == 'room.reopen') {
       return UburoomResponse(id: requests.length, status: 200, value: {'status': 'reopened'});
     }
     return UburoomResponse(id: requests.length, status: 200, value: {'status': 'applied'});

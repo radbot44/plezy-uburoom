@@ -1,3 +1,4 @@
+import 'uburoom_test_requests.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -27,16 +28,22 @@ class _Socket extends UburoomSocketService {
   @override
   String get token => 'fixture-token';
   @override
-  Future<UburoomResponse> sendRequest(String path, [Map<String, dynamic>? data]) async {
-    requests.add((path, data));
-    if (path == '/api/watch/rooms' && data != null) {
+  Future<UburoomResponse> request(
+    Map<String, dynamic> message, {
+    Duration timeout = const Duration(seconds: 12),
+  }) async => framed(message, await answer(requestName(message), requestData(message)));
+
+  /// Answers one request by its name (see uburoom_test_requests.dart).
+  Future<UburoomResponse> answer(String name, [Map<String, dynamic>? data]) async {
+    requests.add((name, data));
+    if (name == 'rooms.create') {
       return UburoomResponse(
         id: 1,
         status: denyCreation ? 403 : 201,
         value: denyCreation ? {'error': 'Room creation is disabled in single-room mode'} : {'id': roomId},
       );
     }
-    if (path == '/api/watch/rooms') {
+    if (name == 'rooms.list') {
       return UburoomResponse(
         id: 1,
         status: 200,
@@ -47,7 +54,7 @@ class _Socket extends UburoomSocketService {
         },
       );
     }
-    if (path.startsWith('/api/watch/rooms/saved')) {
+    if (name == 'rooms.saved') {
       return const UburoomResponse(
         id: 1,
         status: 200,
@@ -59,10 +66,10 @@ class _Socket extends UburoomSocketService {
         },
       );
     }
-    if (path == '/api/watch/rooms/$roomId/reopen') {
+    if (name == 'room.reopen') {
       return const UburoomResponse(id: 1, status: 200, value: {'id': roomId});
     }
-    if (path.startsWith('/api/watch/rooms/$roomId?')) {
+    if (name == 'join') {
       return const UburoomResponse(
         id: 1,
         status: 200,
@@ -90,11 +97,11 @@ void main() {
   });
   tearDown(() => provider.dispose());
 
-  test('create uses the uburoom mutation endpoint then subscribes to the returned UUID', () async {
+  test('create asks the server for a room, then joins the returned UUID', () async {
     expect(await provider.createRoom(name: 'test'), roomId);
-    expect(socket.requests.first.$1, '/api/watch/rooms');
+    expect(socket.requests.first.$1, 'rooms.create');
     expect(socket.requests.first.$2, {'name': 'test', 'visibility': 'public'});
-    expect(socket.requests.last.$1, startsWith('/api/watch/rooms/$roomId?viewer='));
+    expect(socket.requests.last.$1, 'join');
     expect(provider.isUburoomSession, isTrue);
     expect(provider.formattedRoomCode, roomId);
     expect(provider.participants.single.name, 'Fixture host');
@@ -117,14 +124,14 @@ void main() {
 
   test('saved room names resolve to UUIDs and reopen before joining', () async {
     await provider.joinRoom('test');
-    expect(socket.requests.map((request) => request.$1), contains('/api/watch/rooms/$roomId/reopen'));
+    expect(socket.requests.map((request) => request.$1), contains('room.reopen'));
     expect(provider.roomCode, roomId);
   });
 
   test('ambiguous room names cannot select an arbitrary room', () async {
     socket.duplicateName = true;
     await expectLater(provider.joinRoom('test'), throwsA(isA<UburoomRoomException>()));
-    expect(socket.requests.every((request) => request.$2 == null), isTrue);
+    expect(socket.requests.map((request) => request.$1).toSet(), {'rooms.list', 'rooms.saved'}, reason: 'only reads');
     expect(provider.isUburoomSession, isFalse);
   });
 
