@@ -87,7 +87,16 @@ class UburoomQueueItem {
     final serverId = (json['serverId'] ?? (json['media'] is Map ? (json['media'] as Map)['serverId'] : null) ?? '')
         .toString();
     final title = (json['title'] ?? (json['media'] is Map ? (json['media'] as Map)['title'] : null) ?? '').toString();
-    final subtitle = (json['subtitle'] ?? json['parentTitle'] ?? '').toString();
+    final subtitle =
+        (json['subtitle'] ??
+                (json['type'] == 'episode'
+                    ? [
+                        json['grandparentTitle'],
+                        json['parentTitle'],
+                      ].whereType<String>().where((s) => s.isNotEmpty).join(' · ')
+                    : json['parentTitle']) ??
+                '')
+            .toString();
     final type = (json['type'] ?? 'movie').toString();
     final num? rawDuration =
         (json['durationSeconds'] is num
@@ -165,7 +174,7 @@ class UburoomStreamTrack {
 
   factory UburoomStreamTrack.fromJson(Map<String, dynamic> json) {
     final id = (json['id'] ?? json['streamId'] ?? '').toString();
-    final title = (json['title'] ?? json['displayTitle'] ?? json['language'] ?? 'Track').toString();
+    final title = (json['label'] ?? json['title'] ?? json['language'] ?? 'Track').toString();
     final language = json['language']?.toString();
     final codec = json['codec']?.toString();
     final selected = json['selected'] == true;
@@ -231,7 +240,6 @@ class UburoomRoomState {
     this.positionSeconds = 0.0,
     this.durationSeconds = 0.0,
     this.paused = true,
-    this.rate = 1.0,
     this.startAt,
     this.pauseAt,
     this.serverNow,
@@ -247,6 +255,13 @@ class UburoomRoomState {
     this.visibility = 'public',
     this.autoQueue = false,
     this.queue = const [],
+    this.queueCount = 0,
+    this.queueRevision = 0,
+    this.hasNext = false,
+    this.autoQueueMode = 'off',
+    this.currentItem,
+    this.nextItem,
+    this.qualityLabels = const {},
     this.qualityOptions = const [],
     this.selectedQuality,
     this.audioTracks = const [],
@@ -270,7 +285,6 @@ class UburoomRoomState {
   final double positionSeconds;
   final double durationSeconds;
   final bool paused;
-  final double rate;
   final int? startAt;
   final int? pauseAt;
   final int? serverNow;
@@ -286,6 +300,13 @@ class UburoomRoomState {
   final String visibility;
   final bool autoQueue;
   final List<UburoomQueueItem> queue;
+  final int queueCount;
+  final int queueRevision;
+  final bool hasNext;
+  final String autoQueueMode;
+  final UburoomQueueItem? currentItem;
+  final UburoomQueueItem? nextItem;
+  final Map<String, String> qualityLabels;
   final List<String> qualityOptions;
   final String? selectedQuality;
   final List<UburoomStreamTrack> audioTracks;
@@ -297,104 +318,39 @@ class UburoomRoomState {
       mediaUrl ??
       (directHls is String ? directHls as String : (directHls is Map ? (directHls as Map)['url']?.toString() : null));
 
-  factory UburoomRoomState.fromSnapshot(Map<String, dynamic> snapshot, {String deliveryMode = 'auto'}) {
+  factory UburoomRoomState.fromSnapshot(
+    Map<String, dynamic> snapshot, {
+    String deliveryMode = 'auto',
+    List<UburoomQueueItem> queue = const [],
+  }) {
     final stateObj = snapshot['state'] as Map<String, dynamic>?;
-    final mediaObj = snapshot['media'] as Map<String, dynamic>?;
-    final mediaId = snapshot['mediaId']?.toString() ?? mediaObj?['id']?.toString();
-    final title =
-        (snapshot['title'] as String?) ??
-        (mediaObj?['title'] as String?) ??
-        (mediaId != null ? 'Selected Media' : 'Choose something to watch…');
-    final subtitle = (snapshot['subtitle'] as String?) ?? '';
+    final mediaId = snapshot['mediaId'] as String?;
+    final title = snapshot['title'] as String? ?? 'Choose something to watch…';
+    final subtitle = snapshot['subtitle'] as String? ?? '';
     final directHls = snapshot['directHls'];
-    String? fallbackDirectHlsUrl;
-    if (directHls is String) {
-      fallbackDirectHlsUrl = directHls;
-    } else if (directHls is Map) {
-      final urlVal = directHls['url'];
-      if (urlVal is String) {
-        fallbackDirectHlsUrl = urlVal;
-      }
-    }
-    final mediaUrl = (snapshot['mediaUrl'] as String?) ?? fallbackDirectHlsUrl;
-    final readinessVersion =
-        snapshot['readinessVersion']?.toString() ??
-        (snapshot['readiness'] as Map<String, dynamic>?)?['version']?.toString();
-    final waitingForReady = snapshot['waitingForReady'] as bool? ?? false;
-    final epoch = (snapshot['epoch'] ?? '').toString();
-    final revision = snapshot['revision'] as int? ?? 1;
-
-    final rawParticipants = snapshot['participants'] is List
-        ? snapshot['participants'] as List
-        : (snapshot['viewers'] is List ? snapshot['viewers'] as List : const []);
-    final participants = rawParticipants
-        .whereType<Map>()
-        .map((p) => UburoomParticipant.fromJson(Map<String, dynamic>.from(p)))
+    final mediaUrl = snapshot['mediaUrl'] as String?;
+    final readinessVersion = snapshot['readinessVersion']?.toString();
+    final waitingForReady = snapshot['waitingForReady'] == true;
+    final epoch = snapshot['epoch'] as String? ?? '';
+    final revision = snapshot['revision'] as int? ?? 0;
+    final participants = (snapshot['participants'] as List? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map(UburoomParticipant.fromJson)
         .toList();
-
     final directDelivery = snapshot['directDelivery'] == true;
     final subtitleUrl = snapshot['subtitleUrl'] as String?;
-    final visibility = (snapshot['visibility'] as String?) ?? 'public';
-    final autoQueue =
-        snapshot['autoQueue'] == true || (snapshot['queue'] is Map && (snapshot['queue'] as Map)['auto'] == true);
-
-    final List<dynamic> rawQueue;
-    if (snapshot['queue'] is List) {
-      rawQueue = snapshot['queue'] as List<dynamic>;
-    } else if (snapshot['queue'] is Map && (snapshot['queue'] as Map)['items'] is List) {
-      rawQueue = (snapshot['queue'] as Map)['items'] as List<dynamic>;
-    } else if (snapshot['upNext'] is List) {
-      rawQueue = snapshot['upNext'] as List<dynamic>;
-    } else {
-      rawQueue = const [];
-    }
-
-    final queue = <UburoomQueueItem>[];
-    for (final item in rawQueue) {
-      if (item is UburoomQueueItem) {
-        queue.add(item);
-      } else if (item is Map) {
-        queue.add(UburoomQueueItem.fromJson(Map<String, dynamic>.from(item)));
-      }
-    }
-
-    final rawOptions = snapshot['options'] is List
-        ? snapshot['options'] as List
-        : (mediaObj?['options'] is List ? mediaObj!['options'] as List : const []);
-    final qualityOptions = rawOptions.map((e) => e.toString()).toList();
-
-    final selectedQuality =
-        (snapshot['quality'] as String?) ??
-        (snapshot['selection'] is Map ? (snapshot['selection'] as Map)['quality']?.toString() : null);
-
-    final rawAudio = snapshot['audioStreams'] is List
-        ? snapshot['audioStreams'] as List
-        : ((snapshot['streams'] is Map && (snapshot['streams'] as Map)['audio'] is List)
-              ? (snapshot['streams'] as Map)['audio'] as List
-              : (mediaObj?['audioStreams'] is List ? mediaObj!['audioStreams'] as List : const []));
-    final audioTracks = <UburoomStreamTrack>[];
-    for (final item in rawAudio) {
-      if (item is UburoomStreamTrack) {
-        audioTracks.add(item);
-      } else if (item is Map) {
-        audioTracks.add(UburoomStreamTrack.fromJson(Map<String, dynamic>.from(item)));
-      }
-    }
-
-    final rawSubtitle = snapshot['subtitleStreams'] is List
-        ? snapshot['subtitleStreams'] as List
-        : ((snapshot['streams'] is Map && (snapshot['streams'] as Map)['subtitle'] is List)
-              ? (snapshot['streams'] as Map)['subtitle'] as List
-              : (mediaObj?['subtitleStreams'] is List ? mediaObj!['subtitleStreams'] as List : const []));
-    final subtitleTracks = <UburoomStreamTrack>[];
-    for (final item in rawSubtitle) {
-      if (item is UburoomStreamTrack) {
-        subtitleTracks.add(item);
-      } else if (item is Map) {
-        subtitleTracks.add(UburoomStreamTrack.fromJson(Map<String, dynamic>.from(item)));
-      }
-    }
-
+    final visibility = snapshot['visibility'] as String? ?? 'public';
+    final summary = snapshot['queueSummary'] as Map<String, dynamic>? ?? const {};
+    final auto = summary['autoQueue'] as Map<String, dynamic>? ?? const {};
+    final autoQueueMode = auto['mode'] as String? ?? 'off';
+    final qualities = (snapshot['qualities'] as List? ?? const []).whereType<Map<String, dynamic>>();
+    final qualityLabels = {for (final q in qualities) q['id'] as String: q['label'] as String};
+    final tracks = snapshot['tracks'] as Map<String, dynamic>? ?? const {};
+    List<UburoomStreamTrack> readTracks(String kind, String selected) => (tracks[kind] as List? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map((track) => UburoomStreamTrack.fromJson({...track, 'selected': track['id'] == tracks[selected]}))
+        .toList();
+    UburoomQueueItem? entry(dynamic value) => value is Map<String, dynamic> ? UburoomQueueItem.fromJson(value) : null;
     return UburoomRoomState(
       id: snapshot['id']?.toString() ?? '',
       roomName: (snapshot['roomName'] as String?) ?? (snapshot['name'] as String?) ?? snapshot['id']?.toString() ?? '',
@@ -411,30 +367,34 @@ class UburoomRoomState {
       readinessVersion: readinessVersion,
       waitingForReady: waitingForReady,
       positionSeconds: (stateObj?['position'] as num?)?.toDouble() ?? 0.0,
-      durationSeconds:
-          (stateObj?['duration'] as num?)?.toDouble() ??
-          ((mediaObj?['duration'] as num?) != null ? (mediaObj!['duration'] as num).toDouble() / 1000.0 : 0.0),
+      durationSeconds: (stateObj?['duration'] as num?)?.toDouble() ?? 0.0,
       paused: stateObj?['paused'] as bool? ?? true,
-      rate: (stateObj?['rate'] as num?)?.toDouble() ?? 1.0,
       startAt: snapshot['startAt'] as int?,
       pauseAt: snapshot['pauseAt'] as int?,
       serverNow: snapshot['serverNow'] as int?,
       isHost: snapshot['isHost'] as bool? ?? false,
       canPlayback: snapshot['canPlayback'] as bool? ?? false,
       canManage: snapshot['canManage'] as bool? ?? false,
-      durable: snapshot['durable'] == true || snapshot['saved'] == true,
-      viewersCount: snapshot['viewers'] is int ? snapshot['viewers'] as int : participants.length,
+      durable: snapshot['durable'] == true,
+      viewersCount: snapshot['viewers'] as int? ?? 0,
       participants: participants,
       deliveryMode: deliveryMode,
       directDelivery: directDelivery,
       subtitleUrl: subtitleUrl,
       visibility: visibility,
-      autoQueue: autoQueue,
+      autoQueue: autoQueueMode != 'off',
+      autoQueueMode: autoQueueMode,
+      queueCount: summary['pendingCount'] as int? ?? 0,
+      queueRevision: summary['queueRevision'] as int? ?? 0,
+      currentItem: entry(summary['current']),
+      nextItem: entry(summary['next'] ?? auto['next']),
+      hasNext: snapshot['hasNext'] == true,
+      qualityLabels: qualityLabels,
       queue: queue,
-      qualityOptions: qualityOptions,
-      selectedQuality: selectedQuality,
-      audioTracks: audioTracks,
-      subtitleTracks: subtitleTracks,
+      qualityOptions: qualityLabels.keys.toList(),
+      selectedQuality: snapshot['quality'] as String?,
+      audioTracks: readTracks('audio', 'audioId'),
+      subtitleTracks: readTracks('subtitles', 'subtitleId'),
     );
   }
 }

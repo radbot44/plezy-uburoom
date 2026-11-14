@@ -942,6 +942,12 @@ class SettingsService extends BaseSharedPreferencesService {
   static final watchPartyRelayUrl = NullableStringPref('watch_party_relay_url', transform: _normalizeRelayBaseUrl);
   static final uburoomServerUrl = NullableStringPref('uburoom_server_url', transform: _normalizeHttpUrl);
   static const uburoomToken = NullableStringPref('uburoom_token');
+  static const uburoomSubtitlePreference = StringPref('uburoom_subtitle_preference', defaultValue: 'auto');
+  static const uburoomSubtitleMode = StringPref('uburoom_subtitle_mode', defaultValue: 'auto');
+  static const uburoomAudioPreference = NullableStringPref('uburoom_audio_preference');
+  static const uburoomReporting = BoolPref('uburoom_reporting', defaultValue: true);
+  // Personal watch-state sync is opt-in, never inferred from room membership.
+  static const uburoomWatchState = BoolPref('uburoom_watch_state');
 
   static NullableStringPref recentRoomsForProfile(String profileId) {
     if (profileId.trim().isEmpty) {
@@ -1655,6 +1661,11 @@ class SettingsService extends BaseSharedPreferencesService {
     customExternalPlayers,
     watchPartyRelayUrl,
     uburoomServerUrl,
+    uburoomSubtitlePreference,
+    uburoomSubtitleMode,
+    uburoomAudioPreference,
+    uburoomReporting,
+    uburoomWatchState,
     companionRemoteLastHostAddress,
     rememberedBrightnessLevel,
     refusedVideoCodecs,

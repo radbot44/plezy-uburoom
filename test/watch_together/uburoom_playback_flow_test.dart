@@ -102,7 +102,8 @@ void main() {
     clockSync.add(clockSync.begin(), {
       'serverReceivedAt': clockSync.serverNow,
       'serverSentAt': clockSync.serverNow,
-      'serverProcessingMs': 0, 'clockEpoch': 'fixture',
+      'serverProcessingMs': 0,
+      'clockEpoch': 'fixture',
     });
     socket = _TestSocket(clockSync: clockSync);
     auth = _FakeAuth();
@@ -524,7 +525,16 @@ void main() {
     expect(provider.uburoomState?.title, 'Updated Title After Reconnect');
     // A new connection holds no room: the provider joins again with its preferences.
     final subReq = socket.requests.lastWhere((r) => r['request'] == 'join');
-    expect(subReq['data'], {'quality': 'direct', 'delivery': 'auto'});
+    expect(subReq['data'], {
+      'quality': 'direct',
+      'delivery': 'auto',
+      'volume': 100.0,
+      'muted': false,
+      'subtitlePreference': 'auto',
+      'subtitleMode': 'auto',
+      'plexReporting': true,
+      'plexWatchState': false,
+    });
   });
 
   test('play and pause from lobby send room commands when player is not open', () async {
@@ -621,27 +631,24 @@ void main() {
 
     expect(provider.debugUburoomDelivery, 'auto');
     final switchReq = socket.requests.firstWhere((r) => r['request'] == 'join');
-    expect(switchReq['data'], {'quality': 'direct', 'delivery': 'auto'});
-  });
-
-  test('stopMedia in uburoom durable room clears queue and does not send unsupported media.stop', () async {
-    provider.handleUburoomSnapshotForTest({
-      'id': 'room-uuid-1',
-      'durable': true,
-      'epoch': 'ep-durable',
-      'state': {'position': 10, 'duration': 100, 'paused': false},
+    expect(switchReq['data'], {
+      'quality': 'direct',
+      'delivery': 'auto',
+      'volume': 100.0,
+      'muted': false,
+      'subtitlePreference': 'auto',
+      'subtitleMode': 'auto',
+      'plexReporting': true,
+      'plexWatchState': false,
     });
-
-    provider.stopMedia();
-    await pumpEventQueue();
-
-    final clearReq = socket.requests.lastWhere((r) => r['request'] == 'command');
-    expect(clearReq['data']?['command']?['action'], 'queue.clear');
-    final hasMediaStop = socket.requests.any((r) => r['data']?['command']?['action'] == 'media.stop');
-    expect(hasMediaStop, isFalse);
   });
 
-  test('setRate in uburoom session does not send unsupported media.rate command', () async {
+  test('legacy stop action cannot clear an uburoom queue', () {
+    provider.stopMedia();
+    expect(socket.requests, isEmpty);
+  });
+
+  test('user speed changes cannot override the uburoom reconciler', () async {
     provider.handleUburoomSnapshotForTest({
       'id': 'room-uuid-1',
       'epoch': 'ep-1',
@@ -651,8 +658,7 @@ void main() {
     provider.setRate(1.5);
     await pumpEventQueue();
 
-    final hasMediaRate = socket.requests.any((r) => r['data']?['command']?['action'] == 'media.rate');
-    expect(hasMediaRate, isFalse);
+    expect(socket.requests, isEmpty);
   });
 
   test('PlaybackSourceResolver resolves uburoomLocalPath as localFile with reporting disabled', () async {

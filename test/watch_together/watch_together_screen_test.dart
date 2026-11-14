@@ -770,7 +770,7 @@ void main() {
       expect(find.text(t.watchTogether.codeCopied), findsOneWidget);
     });
 
-    testWidgets('UburoomRoomView displays playback controls including Stop button for host', (tester) async {
+    testWidgets('UburoomRoomView displays playback controls without unsupported Stop action', (tester) async {
       final socket = _TestUburoomSocketService();
       final auth = _TestUburoomAuthService();
       final provider = WatchTogetherProvider(socketService: socket, authService: auth, viewerId: 'viewer-alice');
@@ -829,15 +829,7 @@ void main() {
       await tester.pump();
       expect(socket.requests.any((r) => r.$1 == 'command' && r.$2?['command']?['action'] == 'media.pause'), isTrue);
 
-      // Stop button for host
-      final stopButton = find.widgetWithText(OutlinedButton, 'Stop');
-      expect(stopButton, findsOneWidget);
-      expect(find.descendant(of: stopButton, matching: find.byIcon(Symbols.stop_rounded)), findsOneWidget);
-
-      await tester.tap(stopButton);
-      await tester.pump();
-      // Durable room sends queue.clear
-      expect(socket.requests.any((r) => r.$1 == 'command' && r.$2?['command']?['action'] == 'queue.clear'), isTrue);
+      expect(find.widgetWithText(OutlinedButton, 'Stop'), findsNothing);
 
       // Participant list verification
       expect(find.text('Participants (2)'), findsOneWidget);
@@ -969,6 +961,17 @@ void main() {
         serverUrl: 'https://watch.example',
         token: 'mock-token',
       );
+      socket.queueItems = [
+        {
+          'id': 'q-1',
+          'mediaId': 'plex-2',
+          'title': 'The Dark Knight',
+          'subtitle': 'Action · 2008',
+          'durationSeconds': 9120.0,
+        },
+        {'id': 'q-2', 'mediaId': 'plex-3', 'title': 'The Dark Knight Rises', 'durationSeconds': 9840.0},
+      ];
+      socket.queueRevision = 1;
       provider.handleUburoomSnapshotForTest({
         'id': 'uburoom-room-private',
         'name': 'Secret Cinema',
@@ -976,19 +979,14 @@ void main() {
         'revision': 1,
         'durable': true,
         'visibility': 'private',
-        'autoQueue': true,
         'mediaId': 'plex-1',
         'title': 'Batman Begins',
-        'queue': [
-          {
-            'id': 'q-1',
-            'mediaId': 'plex-2',
-            'title': 'The Dark Knight',
-            'subtitle': 'Action · 2008',
-            'durationSeconds': 9120.0,
-          },
-          {'id': 'q-2', 'mediaId': 'plex-3', 'title': 'The Dark Knight Rises', 'durationSeconds': 9840.0},
-        ],
+        'hasNext': true,
+        'queueSummary': {
+          'pendingCount': 2,
+          'queueRevision': 1,
+          'autoQueue': {'mode': 'continue'},
+        },
         'isHost': true,
         'canPlayback': true,
         'participants': [
@@ -1113,6 +1111,10 @@ void main() {
         serverUrl: 'https://watch.example',
         token: 'mock-token',
       );
+      socket.queueItems = [
+        {'id': 'q-next-1', 'mediaId': 'plex-2', 'title': 'Item 2', 'durationSeconds': 5000.0},
+      ];
+      socket.queueRevision = 1;
       provider.handleUburoomSnapshotForTest({
         'id': 'uburoom-room-queue-test',
         'name': 'Queue Test Room',
@@ -1123,9 +1125,12 @@ void main() {
         'mediaId': 'plex-1',
         'title': 'Item 1',
         'durationSeconds': 7200.0,
-        'queue': [
-          {'id': 'q-next-1', 'mediaId': 'plex-2', 'title': 'Item 2', 'durationSeconds': 5000.0},
-        ],
+        'hasNext': true,
+        'queueSummary': {
+          'pendingCount': 1,
+          'queueRevision': 1,
+          'autoQueue': {'mode': 'off'},
+        },
         'isHost': true,
         'canPlayback': true,
         'participants': [
@@ -1167,6 +1172,10 @@ void main() {
         serverUrl: 'https://watch.example',
         token: 'mock-token',
       );
+      socket.queueItems = [
+        {'id': 'q-remove-1', 'mediaId': 'plex-2', 'title': 'Item 2', 'durationSeconds': 5000.0},
+      ];
+      socket.queueRevision = 1;
       provider.handleUburoomSnapshotForTest({
         'id': 'uburoom-room-queue-test',
         'name': 'Queue Test Room',
@@ -1177,9 +1186,12 @@ void main() {
         'mediaId': 'plex-1',
         'title': 'Item 1',
         'durationSeconds': 7200.0,
-        'queue': [
-          {'id': 'q-remove-1', 'mediaId': 'plex-2', 'title': 'Item 2', 'durationSeconds': 5000.0},
-        ],
+        'hasNext': true,
+        'queueSummary': {
+          'pendingCount': 1,
+          'queueRevision': 1,
+          'autoQueue': {'mode': 'off'},
+        },
         'isHost': true,
         'canPlayback': true,
         'participants': [
@@ -1221,20 +1233,26 @@ void main() {
         serverUrl: 'https://watch.example',
         token: 'mock-token',
       );
+      socket.queueItems = [
+        {'id': 'q-1', 'mediaId': 'plex-2', 'title': 'Item 2', 'durationSeconds': 5000.0},
+      ];
+      socket.queueRevision = 1;
       provider.handleUburoomSnapshotForTest({
         'id': 'uburoom-room-queue-test',
         'name': 'Queue Test Room',
         'epoch': 'epoch-1',
         'revision': 1,
         'durable': true,
-        'autoQueue': true,
         'state': {'paused': false, 'time': 100.0},
         'mediaId': 'plex-1',
         'title': 'Item 1',
         'durationSeconds': 7200.0,
-        'queue': [
-          {'id': 'q-1', 'mediaId': 'plex-2', 'title': 'Item 2', 'durationSeconds': 5000.0},
-        ],
+        'hasNext': true,
+        'queueSummary': {
+          'pendingCount': 1,
+          'queueRevision': 1,
+          'autoQueue': {'mode': 'continue'},
+        },
         'isHost': true,
         'canPlayback': true,
         'participants': [
@@ -1258,9 +1276,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        socket.requests.any(
-          (r) => r.$1 == 'room.queue.command' && r.$2?['action'] == 'auto' && r.$2?['mode'] == 'off',
-        ),
+        socket.requests.any((r) => r.$1 == 'room.queue.command' && r.$2?['action'] == 'auto' && r.$2?['mode'] == 'off'),
         isTrue,
       );
     });
@@ -1276,6 +1292,9 @@ class _TestUburoomAuthService extends UburoomAuthService {
 }
 
 class _TestUburoomSocketService extends UburoomSocketService {
+  List<Map<String, dynamic>> queueItems = [];
+  int queueRevision = 0;
+
   final requests = <(String, Map<String, dynamic>?)>[];
   List<Map<String, dynamic>> roomsToReturn = [];
   List<Map<String, dynamic>> savedRoomsToReturn = [];
@@ -1302,6 +1321,13 @@ class _TestUburoomSocketService extends UburoomSocketService {
   /// Answers one request by its name (see uburoom_test_requests.dart).
   Future<UburoomResponse> answer(String name, [Map<String, dynamic>? data]) async {
     requests.add((name, data));
+    if (name == 'room.queue') {
+      return UburoomResponse(
+        id: 1,
+        status: 200,
+        value: {'items': queueItems, 'total': queueItems.length, 'queueRevision': queueRevision},
+      );
+    }
     if (name == 'rooms.list') {
       return UburoomResponse(id: requests.length, status: 200, value: {'rooms': roomsToReturn});
     }

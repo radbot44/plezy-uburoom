@@ -1088,12 +1088,60 @@ void main() {
       expect(raw['uburoomIsTranscoding'], isTrue);
     });
 
+    test('queue entries are read only for an open queue UI and refreshed by summary revision', () async {
+      provider.setUburoomSessionForTest(roomId: 'room', serverUrl: 'https://watch.example', token: 'fixture');
+      var revision = 1;
+      socket.onSend = (name, data) {
+        expect(name, 'room.queue');
+        expect(data, {'offset': 0, 'limit': 100});
+        return UburoomResponse(
+          id: 1,
+          status: 200,
+          value: {
+            'queueRevision': revision,
+            'total': 1,
+            'items': [
+              {'id': 'entry-$revision', 'mediaId': '$revision', 'title': 'Queued film', 'duration': 60},
+            ],
+          },
+        );
+      };
+      Future<void> publish() => provider.handleUburoomSnapshotAsyncForTest({
+        'id': 'room',
+        'epoch': 'epoch',
+        'queueSummary': {
+          'pendingCount': 1,
+          'queueRevision': revision,
+          'autoQueue': {'mode': 'off'},
+        },
+      });
+      await publish();
+      expect(socket.requests, isEmpty);
+      provider.watchUburoomQueue();
+      await pumpEventQueue();
+      expect(provider.uburoomState?.queue.single.id, 'entry-1');
+      expect(provider.uburoomState?.queue.single.durationSeconds, 60);
+      await publish();
+      await pumpEventQueue();
+      expect(socket.requests, hasLength(1)); // Unchanged summaries never refetch.
+      revision++;
+      await publish();
+      await pumpEventQueue();
+      expect(provider.uburoomState?.queue.single.id, 'entry-2');
+      provider.unwatchUburoomQueue();
+      revision++;
+      await publish();
+      await pumpEventQueue();
+      expect(socket.requests, hasLength(2));
+      expect(provider.uburoomState?.queue, isEmpty); // Stale entries are not shown.
+    });
+
     test('setUburoomQuality updates uburoomQuality and sends the personal quality command', () async {
       expect(provider.uburoomQuality, 'direct');
 
-      // Changing quality outside session updates getter without sending requests
-      await provider.setUburoomQuality('720p-2mbps');
-      expect(provider.uburoomQuality, '720p-2mbps');
+      // Without a server catalog no quality can be selected.
+      await provider.setUburoomQuality('720p2');
+      expect(provider.uburoomQuality, 'direct');
       expect(socket.requests, isEmpty);
 
       // Now join a session
@@ -1103,14 +1151,24 @@ void main() {
         token: 'fixture-token-64hex',
       );
 
-      await provider.setUburoomQuality('1080p-10mbps');
-      expect(provider.uburoomQuality, '1080p-10mbps');
+      await provider.handleUburoomSnapshotAsyncForTest({
+        'id': '11111111-2222-3333-4444-555555555555',
+        'epoch': 'epoch',
+        'qualities': [
+          {'id': 'direct', 'label': 'Original'},
+          {'id': '1080p8', 'label': '1080p · 8 Mbps'},
+        ],
+      });
+      await provider.setUburoomQuality('1080p12');
+      expect(socket.requests, isEmpty); // Valid server ID, but not offered to this viewer.
+      await provider.setUburoomQuality('1080p8');
+      expect(provider.uburoomQuality, '1080p8');
 
       expect(socket.requests, hasLength(1));
       expect(socket.requests.single['request'], 'command');
       expect((socket.requests.single['data'] as Map)['command'], {
         'action': 'media.quality.set',
-        'args': {'quality': '1080p-10mbps'},
+        'args': {'quality': '1080p8'},
       });
     });
 

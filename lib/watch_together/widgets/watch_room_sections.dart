@@ -1,3 +1,5 @@
+import 'uburoom_queue_scope.dart';
+import 'uburoom_viewer_settings.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -319,173 +321,170 @@ class WatchMediaSection extends StatelessWidget {
 
     if (provider.isUburoomSession) {
       final ubState = provider.uburoomState;
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(t.watchTogether.nowPlaying, style: _muted(context, theme.textTheme.labelLarge)),
-          const SizedBox(height: 4),
-          if (ubState == null || !ubState.hasMedia) ...[
-            Text(t.watchTogether.nothingPlaying, style: theme.textTheme.titleMedium),
-            Text(
-              provider.isHost ? t.watchTogether.nothingPlayingHost : t.watchTogether.nothingPlayingGuest,
-              style: _muted(context, theme.textTheme.bodySmall),
-            ),
-          ] else ...[
-            Text(ubState.title, style: theme.textTheme.titleMedium),
-            if (ubState.subtitle.isNotEmpty) ...[
-              const SizedBox(height: 2),
-              Text(ubState.subtitle, style: _muted(context, theme.textTheme.bodySmall)),
-            ],
-            const SizedBox(height: 8),
-            _InfoNote(
-              icon: ubState.deliveryMode == 'local' ? Symbols.file_download_done_rounded : Symbols.cloud_sync_rounded,
-              text: ubState.deliveryMode == 'local' ? 'Playing downloaded local file' : 'Streaming from uburoom',
-            ),
-            if (provider.canJoinPlayback) ...[
-              const SizedBox(height: 16),
-              Text(t.watchTogether.joinCurrentPlaybackDescription, style: _muted(context, theme.textTheme.bodySmall)),
+      return UburoomQueueScope(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(t.watchTogether.nowPlaying, style: _muted(context, theme.textTheme.labelLarge)),
+            const SizedBox(height: 4),
+            if (ubState == null || !ubState.hasMedia) ...[
+              Text(t.watchTogether.nothingPlaying, style: theme.textTheme.titleMedium),
+              Text(
+                provider.isHost ? t.watchTogether.nothingPlayingHost : t.watchTogether.nothingPlayingGuest,
+                style: _muted(context, theme.textTheme.bodySmall),
+              ),
+            ] else ...[
+              Text(ubState.title, style: theme.textTheme.titleMedium),
+              if (ubState.subtitle.isNotEmpty) ...[
+                const SizedBox(height: 2),
+                Text(ubState.subtitle, style: _muted(context, theme.textTheme.bodySmall)),
+              ],
               const SizedBox(height: 8),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: WatchButton(
-                  label: t.watchTogether.joinCurrentPlayback,
-                  icon: Symbols.play_arrow_rounded,
-                  style: WatchButtonStyle.filled,
-                  onPressed: () => unawaited(provider.joinPlayback()),
-                ),
+              _InfoNote(
+                icon: ubState.deliveryMode == 'local' ? Symbols.file_download_done_rounded : Symbols.cloud_sync_rounded,
+                text: ubState.deliveryMode == 'local' ? 'Playing downloaded local file' : 'Streaming from uburoom',
               ),
+              if (provider.canJoinPlayback) ...[
+                const SizedBox(height: 16),
+                Text(t.watchTogether.joinCurrentPlaybackDescription, style: _muted(context, theme.textTheme.bodySmall)),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: WatchButton(
+                    label: t.watchTogether.joinCurrentPlayback,
+                    icon: Symbols.play_arrow_rounded,
+                    style: WatchButtonStyle.filled,
+                    onPressed: () => unawaited(provider.joinPlayback()),
+                  ),
+                ),
+              ],
+              if (ubState.canPlayback || provider.isHost) ...[
+                const SizedBox(height: 12),
+                WatchButtonRow(
+                  children: [
+                    if (ubState.canPlayback)
+                      WatchButton(
+                        label: ubState.paused ? t.common.play : t.common.pause,
+                        icon: ubState.paused ? Symbols.play_arrow_rounded : Symbols.pause_rounded,
+                        onPressed: () {
+                          if (ubState.paused) {
+                            provider.play();
+                          } else {
+                            provider.pause();
+                          }
+                        },
+                      ),
+                    if (ubState.canPlayback && ubState.hasNext)
+                      WatchButton(
+                        label: 'Next',
+                        icon: Symbols.skip_next_rounded,
+                        onPressed: () => unawaited(provider.skipToNextInUburoom()),
+                      ),
+                  ],
+                ),
+              ],
             ],
-            if (ubState.canPlayback || provider.isHost) ...[
-              const SizedBox(height: 12),
-              WatchButtonRow(
+            if (ubState?.hasMedia == true) const UburoomViewerSettings(),
+            if (ubState != null && (ubState.durable || ubState.queueCount > 0)) ...[
+              const SizedBox(height: 20),
+              Row(
                 children: [
-                  if (ubState.canPlayback)
-                    WatchButton(
-                      label: ubState.paused ? t.common.play : t.common.pause,
-                      icon: ubState.paused ? Symbols.play_arrow_rounded : Symbols.pause_rounded,
-                      onPressed: () {
-                        if (ubState.paused) {
-                          provider.play();
-                        } else {
-                          provider.pause();
-                        }
-                      },
-                    ),
-                  if (ubState.canPlayback && ubState.queue.isNotEmpty)
-                    WatchButton(
-                      label: 'Next',
-                      icon: Symbols.skip_next_rounded,
-                      onPressed: () => unawaited(provider.skipToNextInUburoom()),
-                    ),
-                  if (provider.isHost)
-                    WatchButton(
-                      label: t.watchTogether.stopMedia,
-                      icon: Symbols.stop_rounded,
-                      onPressed: provider.stopMedia,
-                    ),
-                ],
-              ),
-            ],
-          ],
-          if (ubState != null && ubState.queue.isNotEmpty) ...[
-            const SizedBox(height: 20),
-            Row(
-              children: [
-                Expanded(
-                  child: Text('Up Next (${ubState.queue.length})', style: _muted(context, theme.textTheme.labelLarge)),
-                ),
-                if (ubState.canPlayback || provider.isHost) ...[
-                  if (ubState.durable || ubState.autoQueue)
-                    FocusableButton(
-                      onPressed: () => unawaited(provider.setUburoomAutoQueue(!ubState.autoQueue)),
-                      child: Material(
-                        color: ubState.autoQueue ? theme.colorScheme.secondaryContainer : Colors.transparent,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: const BorderRadius.all(Radius.circular(4)),
-                          side: ubState.autoQueue
-                              ? BorderSide.none
-                              : BorderSide(color: theme.colorScheme.outlineVariant),
-                        ),
-                        child: InkWell(
-                          borderRadius: const BorderRadius.all(Radius.circular(4)),
-                          onTap: () => unawaited(provider.setUburoomAutoQueue(!ubState.autoQueue)),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                AppIcon(
-                                  Symbols.autorenew_rounded,
-                                  size: 16,
-                                  color: ubState.autoQueue
-                                      ? theme.colorScheme.onSecondaryContainer
-                                      : theme.colorScheme.onSurfaceVariant,
-                                ),
-                                const SizedBox(width: 4),
-                                Text(
-                                  'Auto-queue',
-                                  style: theme.textTheme.labelSmall?.copyWith(
+                  Expanded(
+                    child: Text('Up Next (${ubState.queueCount})', style: _muted(context, theme.textTheme.labelLarge)),
+                  ),
+                  if (ubState.canPlayback || provider.isHost) ...[
+                    if (ubState.durable || ubState.autoQueue)
+                      FocusableButton(
+                        onPressed: () => unawaited(provider.setUburoomAutoQueue(!ubState.autoQueue)),
+                        child: Material(
+                          color: ubState.autoQueue ? theme.colorScheme.secondaryContainer : Colors.transparent,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: const BorderRadius.all(Radius.circular(4)),
+                            side: ubState.autoQueue
+                                ? BorderSide.none
+                                : BorderSide(color: theme.colorScheme.outlineVariant),
+                          ),
+                          child: InkWell(
+                            borderRadius: const BorderRadius.all(Radius.circular(4)),
+                            onTap: () => unawaited(provider.setUburoomAutoQueue(!ubState.autoQueue)),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  AppIcon(
+                                    Symbols.autorenew_rounded,
+                                    size: 16,
                                     color: ubState.autoQueue
                                         ? theme.colorScheme.onSecondaryContainer
                                         : theme.colorScheme.onSurfaceVariant,
-                                    fontWeight: ubState.autoQueue ? FontWeight.bold : FontWeight.normal,
                                   ),
-                                ),
-                              ],
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    'Auto-queue',
+                                    style: theme.textTheme.labelSmall?.copyWith(
+                                      color: ubState.autoQueue
+                                          ? theme.colorScheme.onSecondaryContainer
+                                          : theme.colorScheme.onSurfaceVariant,
+                                      fontWeight: ubState.autoQueue ? FontWeight.bold : FontWeight.normal,
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
                         ),
                       ),
+                  ] else if (ubState.autoQueue) ...[
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        AppIcon(Symbols.autorenew_rounded, size: 16, color: theme.colorScheme.onSurfaceVariant),
+                        const SizedBox(width: 4),
+                        Text('Auto-queue', style: _muted(context, theme.textTheme.bodySmall)),
+                      ],
                     ),
-                ] else if (ubState.autoQueue) ...[
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
+                  ],
+                ],
+              ),
+              const SizedBox(height: 8),
+              for (final item in ubState.queue) ...[
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
-                      AppIcon(Symbols.autorenew_rounded, size: 16, color: theme.colorScheme.onSurfaceVariant),
-                      const SizedBox(width: 4),
-                      Text('Auto-queue', style: _muted(context, theme.textTheme.bodySmall)),
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: AppIcon(
+                          Symbols.playlist_play_rounded,
+                          size: 20,
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(item.title, style: theme.textTheme.bodyMedium),
+                            if (item.subtitle.isNotEmpty)
+                              Text(item.subtitle, style: _muted(context, theme.textTheme.bodySmall)),
+                          ],
+                        ),
+                      ),
+                      if (ubState.canPlayback || provider.isHost)
+                        IconButton(
+                          icon: const AppIcon(Symbols.close_rounded, size: 18),
+                          tooltip: 'Remove from queue',
+                          onPressed: () => unawaited(provider.removeFromUburoomQueue(item.id)),
+                        ),
                     ],
                   ),
-                ],
-              ],
-            ),
-            const SizedBox(height: 8),
-            for (final item in ubState.queue) ...[
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: AppIcon(
-                        Symbols.playlist_play_rounded,
-                        size: 20,
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(item.title, style: theme.textTheme.bodyMedium),
-                          if (item.subtitle.isNotEmpty)
-                            Text(item.subtitle, style: _muted(context, theme.textTheme.bodySmall)),
-                        ],
-                      ),
-                    ),
-                    if (ubState.canPlayback || provider.isHost)
-                      IconButton(
-                        icon: const AppIcon(Symbols.close_rounded, size: 18),
-                        tooltip: 'Remove from queue',
-                        onPressed: () => unawaited(provider.removeFromUburoomQueue(item.id)),
-                      ),
-                  ],
                 ),
-              ),
+              ],
             ],
           ],
-        ],
+        ),
       );
     }
 
@@ -566,7 +565,7 @@ String? watchMatchSummary(WatchTogetherProvider provider) {
   if (provider.isUburoomSession) {
     final ubState = provider.uburoomState;
     if (ubState == null) return null;
-    final queueCount = ubState.queue.length;
+    final queueCount = ubState.queueCount;
     final queueSuffix = queueCount > 0 ? ' · $queueCount queued' : '';
     if (!ubState.hasMedia) {
       return queueCount > 0 ? '$queueCount queued' : null;

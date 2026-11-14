@@ -529,14 +529,7 @@ class WatchTogetherProvider extends ChangeNotifier {
 
   /// Host: stops the media for everyone.
   void stopMedia() {
-    if (isUburoomSession) {
-      if (_uburoomState?.durable == true) {
-        unawaited(_sendUburoomCommand('queue.clear'));
-      } else {
-        unawaited(_sendUburoomCommand('media.pause'));
-      }
-      return;
-    }
+    if (isUburoomSession) return;
     _guard(() => _party?.clearMedia());
   }
 
@@ -662,8 +655,7 @@ class WatchTogetherProvider extends ChangeNotifier {
 
   bool setRate(double rate) {
     if (isUburoomSession) {
-      // Uburoom room protocol does not support shared media.rate commands.
-      return false;
+      return true; // The native reconciler owns rate while following uburoom.
     }
     if (!_routes()) return false;
     if (_refuseWithoutControl()) return true;
@@ -676,7 +668,7 @@ class WatchTogetherProvider extends ChangeNotifier {
 
   /// The room's playback rate: the speed the user chose for everyone, as
   /// opposed to the player's momentary drift-correcting rate.
-  double? get roomRate => isUburoomSession ? _uburoomState?.rate : room?.rate;
+  double? get roomRate => isUburoomSession ? 1.0 : room?.rate;
 
   // ---------------------------------------------------------------------------
   // The player
@@ -1222,11 +1214,90 @@ class WatchTogetherProvider extends ChangeNotifier {
     }
   }
 
+  int _queueReaders = 0;
+  int? _loadedQueueRevision;
+  bool _queueLoading = false;
+  List<UburoomQueueItem> _queueItems = const [];
+  String? uburoomQueueError;
+
+  void watchUburoomQueue() {
+    _queueReaders++;
+    unawaited(refreshUburoomQueue());
+  }
+
+  void unwatchUburoomQueue() {
+    _queueReaders--;
+  }
+
+  Future<void> refreshUburoomQueue() async {
+    final roomId = _uburoomRoomId;
+    final socket = _socketService;
+    if (_queueReaders == 0 || roomId == null || socket == null || !socket.isConnected || _queueLoading) return;
+    if (_loadedQueueRevision == _uburoomState?.queueRevision) return;
+    _queueLoading = true;
+    final epoch = _uburoomState?.epoch;
+    final requestedRevision = _uburoomState?.queueRevision;
+    bool changedDuringRead = false;
+    try {
+      final items = <UburoomQueueItem>[];
+      int? revision;
+      while (true) {
+        final page = _uburoomValue(
+          await socket.call('room.queue', roomId: roomId, args: {'offset': items.length, 'limit': 100}),
+        );
+        if (_disposed || _uburoomRoomId != roomId || _uburoomState?.epoch != epoch) return;
+        final pageRevision = page['queueRevision'] as int;
+        // Never combine pages from different queue revisions. The next push retries.
+        if (revision != null && revision != pageRevision) {
+          changedDuringRead = true;
+          return;
+        }
+        revision = pageRevision;
+        final rows = page['items'] as List;
+        items.addAll(rows.cast<Map<String, dynamic>>().map(UburoomQueueItem.fromJson));
+        if (rows.isEmpty || items.length >= (page['total'] as int)) break;
+      }
+      if (revision != _uburoomState?.queueRevision) {
+        changedDuringRead = requestedRevision != _uburoomState?.queueRevision;
+        return;
+      }
+      _queueItems = items;
+      _loadedQueueRevision = revision;
+      uburoomQueueError = null;
+      _uburoomState = UburoomRoomState.fromSnapshot(
+        _lastUburoomSnapshot!,
+        deliveryMode: _uburoomDelivery,
+        queue: _queueItems,
+      );
+      if (!_disposed) notifyListeners();
+    } catch (e) {
+      uburoomQueueError = 'Could not load queue';
+      appLogger.w('Uburoom: queue read failed', error: e);
+      if (!_disposed) notifyListeners();
+    } finally {
+      _queueLoading = false;
+      if (!_disposed && (changedDuringRead || _uburoomRoomId != roomId || _uburoomState?.epoch != epoch)) {
+        unawaited(refreshUburoomQueue());
+      }
+    }
+  }
+
+  Future<void> setUburoomTracks({String? audioId, String? subtitleId}) async {
+    final state = _uburoomState;
+    if (state == null) return;
+    await _sendUburoomCommand('media.tracks.set', {
+      'mediaVersion': state.mediaVersion,
+      'streamVersion': state.streamVersion,
+      'audioId': ?audioId,
+      'subtitleId': ?subtitleId,
+    });
+  }
+
   /// Sets this viewer's stream quality. It is a personal room command; the
   /// server prepares the new stream and pushes it.
   Future<void> setUburoomQuality(String quality) async {
+    if (_uburoomState?.qualityOptions.contains(quality) != true) return;
     _uburoomQuality = quality;
-    notifyListeners();
     if (isUburoomSession) await _sendUburoomCommand('media.quality.set', {'quality': quality});
   }
 
@@ -1394,6 +1465,20 @@ class WatchTogetherProvider extends ChangeNotifier {
     return roomId;
   }
 
+  Map<String, dynamic> _joinPreferences() {
+    final settings = SettingsService.instanceOrNull;
+    final player = _player?.adapter.player;
+    return {
+      'volume': (player?.state.volume ?? settings?.read(SettingsService.volume) ?? 100.0).clamp(0, 100),
+      'muted': (player?.state.volume ?? settings?.read(SettingsService.volume) ?? 100.0) == 0,
+      'subtitlePreference': settings?.read(SettingsService.uburoomSubtitlePreference) ?? 'auto',
+      'subtitleMode': settings?.read(SettingsService.uburoomSubtitleMode) ?? 'auto',
+      if (settings?.read(SettingsService.uburoomAudioPreference) case final String audio) 'audioPreference': audio,
+      'plexReporting': settings?.read(SettingsService.uburoomReporting) ?? true,
+      'plexWatchState': settings?.read(SettingsService.uburoomWatchState) ?? false,
+    };
+  }
+
   Future<void> _joinUburoomRoom(String roomId, {bool create = false}) async {
     await _closeParty();
 
@@ -1409,7 +1494,16 @@ class WatchTogetherProvider extends ChangeNotifier {
     _uburoomConnSub = socket.connectionStateStream.listen(_onUburoomConnectionStateChanged);
 
     _uburoomDelivery = 'auto';
-    final res = await socket.join(roomId, _viewerId, quality: _uburoomQuality, delivery: _uburoomDelivery);
+    _queueItems = const [];
+    _loadedQueueRevision = null;
+    uburoomQueueError = null;
+    final res = await socket.join(
+      roomId,
+      _viewerId,
+      quality: _uburoomQuality,
+      preferences: _joinPreferences(),
+      delivery: _uburoomDelivery,
+    );
     final snapshot = _uburoomValue(res);
 
     _uburoomRoomId = roomId;
@@ -1467,7 +1561,13 @@ class WatchTogetherProvider extends ChangeNotifier {
         unawaited(() async {
           try {
             // A new connection holds no room: this tab joins again as the same viewer.
-            final res = await socket.join(roomId, _viewerId, quality: _uburoomQuality, delivery: _uburoomDelivery);
+            final res = await socket.join(
+              roomId,
+              _viewerId,
+              quality: _uburoomQuality,
+              preferences: _joinPreferences(),
+              delivery: _uburoomDelivery,
+            );
             if (_uburoomRoomId != roomId) return;
             if (!res.isSuccess && res.status >= 400 && res.status < 500) {
               // The room is gone, private or full now; it cannot be resumed.
@@ -1487,8 +1587,13 @@ class WatchTogetherProvider extends ChangeNotifier {
 
   Future<void> _handleUburoomSnapshot(Map<String, dynamic> snapshot) async {
     _lastUburoomSnapshot = snapshot;
-    final ubState = UburoomRoomState.fromSnapshot(snapshot, deliveryMode: _uburoomDelivery);
+    final ubState = UburoomRoomState.fromSnapshot(
+      snapshot,
+      deliveryMode: _uburoomDelivery,
+      queue: _loadedQueueRevision == (snapshot['queueSummary'] as Map?)?['queueRevision'] ? _queueItems : const [],
+    );
     _uburoomState = ubState;
+    unawaited(refreshUburoomQueue());
     if (ubState.epoch.isNotEmpty) {
       _uburoomEpoch = ubState.epoch;
     }
@@ -1584,7 +1689,7 @@ class WatchTogetherProvider extends ChangeNotifier {
             // Joining again as the same viewer changes how the server delivers to it.
             unawaited(
               socket
-                  .join(roomId, _viewerId, quality: _uburoomQuality, delivery: 'local')
+                  .join(roomId, _viewerId, quality: _uburoomQuality, preferences: _joinPreferences(), delivery: 'local')
                   .catchError((Object _) => const UburoomResponse(id: 0, status: 503)),
             );
           }
@@ -1597,7 +1702,13 @@ class WatchTogetherProvider extends ChangeNotifier {
           final roomId = _uburoomRoomId;
           if (socket != null && socket.isConnected && roomId != null) {
             try {
-              final res = await socket.join(roomId, _viewerId, quality: _uburoomQuality, delivery: 'auto');
+              final res = await socket.join(
+                roomId,
+                _viewerId,
+                quality: _uburoomQuality,
+                preferences: _joinPreferences(),
+                delivery: 'auto',
+              );
               effectiveSnapshot = _uburoomValue(res);
               _lastUburoomSnapshot = effectiveSnapshot;
               _uburoomState = UburoomRoomState.fromSnapshot(effectiveSnapshot, deliveryMode: _uburoomDelivery);

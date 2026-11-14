@@ -10,6 +10,8 @@ import '../../widgets/app_icon.dart';
 import '../models/uburoom_room_state.dart';
 import '../providers/watch_together_provider.dart';
 import 'watch_room_sections.dart';
+import 'uburoom_queue_scope.dart';
+import 'uburoom_viewer_settings.dart';
 
 /// Native Plezy-style room view for an active uburoom session.
 class UburoomRoomView extends StatelessWidget {
@@ -26,187 +28,249 @@ class UburoomRoomView extends StatelessWidget {
     final theme = Theme.of(context);
     final isHost = state.isHost || state.canManage;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (provider.isReconnecting) const WatchReconnectingBanner(),
-        _Card(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  const AppIcon(Symbols.meeting_room_rounded, size: 28),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Flexible(
-                              child: Text(
-                                state.roomName.isNotEmpty ? state.roomName : state.id,
-                                style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                            if (state.durable) ...[
-                              const SizedBox(width: 8),
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: theme.colorScheme.secondaryContainer,
-                                  borderRadius: const BorderRadius.all(Radius.circular(4)),
-                                ),
-                                child: Text(
-                                  'Saved room',
-                                  style: theme.textTheme.labelSmall?.copyWith(
-                                    color: theme.colorScheme.onSecondaryContainer,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                            ],
-                            if (state.visibility == 'private') ...[
-                              const SizedBox(width: 8),
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: theme.colorScheme.tertiaryContainer,
-                                  borderRadius: const BorderRadius.all(Radius.circular(4)),
-                                ),
-                                child: Text(
-                                  'Private',
-                                  style: theme.textTheme.labelSmall?.copyWith(
-                                    color: theme.colorScheme.onTertiaryContainer,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
-                        Text(
-                          state.id,
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            fontFamily: 'monospace',
-                            color: theme.colorScheme.outline,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                    ),
-                  ),
-                  IconButton(
-                    icon: const AppIcon(Symbols.content_copy_rounded),
-                    tooltip: 'Copy room ID',
-                    onPressed: () => unawaited(copyRoomCode(context, state.id)),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-        _Card(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('Media', style: theme.textTheme.titleSmall?.copyWith(color: theme.colorScheme.primary)),
-              const SizedBox(height: 8),
-              if (state.hasMedia) ...[
+    return UburoomQueueScope(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (provider.isReconnecting) const WatchReconnectingBanner(),
+          _Card(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
                 Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    AppIcon(
-                      state.paused ? Symbols.pause_circle_rounded : Symbols.play_circle_rounded,
-                      size: 32,
-                      fill: 1,
-                    ),
+                    const AppIcon(Symbols.meeting_room_rounded, size: 28),
                     const SizedBox(width: 12),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(state.title, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600)),
-                          if (state.subtitle.isNotEmpty)
-                            Text(
-                              state.subtitle,
-                              style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-                            ),
-                          const SizedBox(height: 4),
+                          Row(
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  state.roomName.isNotEmpty ? state.roomName : state.id,
+                                  style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              if (state.durable) ...[
+                                const SizedBox(width: 8),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: theme.colorScheme.secondaryContainer,
+                                    borderRadius: const BorderRadius.all(Radius.circular(4)),
+                                  ),
+                                  child: Text(
+                                    'Saved room',
+                                    style: theme.textTheme.labelSmall?.copyWith(
+                                      color: theme.colorScheme.onSecondaryContainer,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                              if (state.visibility == 'private') ...[
+                                const SizedBox(width: 8),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: theme.colorScheme.tertiaryContainer,
+                                    borderRadius: const BorderRadius.all(Radius.circular(4)),
+                                  ),
+                                  child: Text(
+                                    'Private',
+                                    style: theme.textTheme.labelSmall?.copyWith(
+                                      color: theme.colorScheme.onTertiaryContainer,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
                           Text(
-                            _formatPlaybackTimeline(state),
-                            style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.outline),
+                            state.id,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              fontFamily: 'monospace',
+                              color: theme.colorScheme.outline,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
                         ],
                       ),
                     ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    if (provider.canJoinPlayback)
-                      FilledButton.icon(
-                        icon: const AppIcon(Symbols.play_arrow_rounded, fill: 1),
-                        label: const Text('Join Playback'),
-                        onPressed: () => unawaited(provider.joinPlayback()),
-                      ),
-                    if (state.canPlayback)
-                      OutlinedButton.icon(
-                        icon: AppIcon(state.paused ? Symbols.play_arrow_rounded : Symbols.pause_rounded),
-                        label: Text(state.paused ? 'Play' : 'Pause'),
-                        onPressed: () {
-                          if (state.paused) {
-                            provider.play();
-                          } else {
-                            provider.pause();
-                          }
-                        },
-                      ),
-                    if (state.hasMedia && state.canPlayback && state.queue.isNotEmpty)
-                      OutlinedButton.icon(
-                        icon: const AppIcon(Symbols.skip_next_rounded),
-                        label: const Text('Next'),
-                        onPressed: () => unawaited(provider.skipToNextInUburoom()),
-                      ),
-                    if (isHost && state.canPlayback)
-                      OutlinedButton.icon(
-                        icon: const AppIcon(Symbols.stop_rounded),
-                        label: const Text('Stop'),
-                        onPressed: () => provider.stopMedia(),
-                      ),
-                  ],
-                ),
-              ] else ...[
-                Row(
-                  children: [
-                    AppIcon(Symbols.movie_rounded, size: 32, color: theme.colorScheme.outline),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('Nothing playing', style: theme.textTheme.titleMedium),
-                          Text(
-                            'Choose something to watch in uburoom…',
-                            style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.outline),
-                          ),
-                        ],
-                      ),
+                    IconButton(
+                      icon: const AppIcon(Symbols.content_copy_rounded),
+                      tooltip: 'Copy room ID',
+                      onPressed: () => unawaited(copyRoomCode(context, state.id)),
                     ),
                   ],
                 ),
               ],
-            ],
+            ),
           ),
-        ),
-        if (state.durable || state.queue.isNotEmpty)
+          _Card(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Media', style: theme.textTheme.titleSmall?.copyWith(color: theme.colorScheme.primary)),
+                const SizedBox(height: 8),
+                if (state.hasMedia) ...[
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      AppIcon(
+                        state.paused ? Symbols.pause_circle_rounded : Symbols.play_circle_rounded,
+                        size: 32,
+                        fill: 1,
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              state.title,
+                              style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+                            ),
+                            if (state.subtitle.isNotEmpty)
+                              Text(
+                                state.subtitle,
+                                style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                              ),
+                            const SizedBox(height: 4),
+                            Text(
+                              _formatPlaybackTimeline(state),
+                              style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.outline),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      if (provider.canJoinPlayback)
+                        FilledButton.icon(
+                          icon: const AppIcon(Symbols.play_arrow_rounded, fill: 1),
+                          label: const Text('Join Playback'),
+                          onPressed: () => unawaited(provider.joinPlayback()),
+                        ),
+                      if (state.canPlayback)
+                        OutlinedButton.icon(
+                          icon: AppIcon(state.paused ? Symbols.play_arrow_rounded : Symbols.pause_rounded),
+                          label: Text(state.paused ? 'Play' : 'Pause'),
+                          onPressed: () {
+                            if (state.paused) {
+                              provider.play();
+                            } else {
+                              provider.pause();
+                            }
+                          },
+                        ),
+                      if (state.hasMedia && state.canPlayback && state.hasNext)
+                        OutlinedButton.icon(
+                          icon: const AppIcon(Symbols.skip_next_rounded),
+                          label: const Text('Next'),
+                          onPressed: () => unawaited(provider.skipToNextInUburoom()),
+                        ),
+                    ],
+                  ),
+                ] else ...[
+                  Row(
+                    children: [
+                      AppIcon(Symbols.movie_rounded, size: 32, color: theme.colorScheme.outline),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('Nothing playing', style: theme.textTheme.titleMedium),
+                            Text(
+                              'Choose something to watch in uburoom…',
+                              style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.outline),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+          ),
+          if (state.hasMedia) const UburoomViewerSettings(),
+          if (state.durable || state.queueCount > 0)
+            _Card(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Row(
+                      children: [
+                        Text(
+                          'Queue (${state.queueCount})',
+                          style: theme.textTheme.titleSmall?.copyWith(color: theme.colorScheme.primary),
+                        ),
+                        if (state.canPlayback || isHost) ...[
+                          if (state.durable || state.autoQueue) ...[
+                            const SizedBox(width: 8),
+                            FilterChip(
+                              label: const Text('Auto-queue'),
+                              selected: state.autoQueue,
+                              visualDensity: VisualDensity.compact,
+                              onSelected: (value) => unawaited(provider.setUburoomAutoQueue(value)),
+                            ),
+                          ],
+                        ] else if (state.autoQueue) ...[
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: theme.colorScheme.secondaryContainer,
+                              borderRadius: const BorderRadius.all(Radius.circular(4)),
+                            ),
+                            child: Text(
+                              'Auto-queue',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: theme.colorScheme.onSecondaryContainer,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  if (state.queue.isEmpty)
+                    Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      child: Text(
+                        provider.uburoomQueueError ?? (state.queueCount == 0 ? 'Queue is empty' : 'Loading queue…'),
+                      ),
+                    )
+                  else
+                    for (var i = 0; i < state.queue.length; i++)
+                      _QueueTile(
+                        index: i + 1,
+                        item: state.queue[i],
+                        onRemove: (state.canPlayback || isHost)
+                            ? () => unawaited(provider.removeFromUburoomQueue(state.queue[i].id))
+                            : null,
+                      ),
+                ],
+              ),
+            ),
           _Card(
             padding: const EdgeInsets.symmetric(vertical: 12),
             child: Column(
@@ -216,106 +280,46 @@ class UburoomRoomView extends StatelessWidget {
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   child: Row(
                     children: [
-                      Text(
-                        'Queue (${state.queue.length})',
-                        style: theme.textTheme.titleSmall?.copyWith(color: theme.colorScheme.primary),
-                      ),
-                      if (state.canPlayback || isHost) ...[
-                        if (state.durable || state.autoQueue) ...[
-                          const SizedBox(width: 8),
-                          FilterChip(
-                            label: const Text('Auto-queue'),
-                            selected: state.autoQueue,
-                            visualDensity: VisualDensity.compact,
-                            onSelected: (value) => unawaited(provider.setUburoomAutoQueue(value)),
-                          ),
-                        ],
-                      ] else if (state.autoQueue) ...[
-                        const SizedBox(width: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: theme.colorScheme.secondaryContainer,
-                            borderRadius: const BorderRadius.all(Radius.circular(4)),
-                          ),
-                          child: Text(
-                            'Auto-queue',
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: theme.colorScheme.onSecondaryContainer,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
+                      Expanded(
+                        child: Text(
+                          'Participants (${state.participants.length})',
+                          style: theme.textTheme.titleSmall?.copyWith(color: theme.colorScheme.primary),
                         ),
-                      ],
+                      ),
                     ],
                   ),
                 ),
                 const SizedBox(height: 8),
-                if (state.queue.isEmpty)
+                if (state.participants.isEmpty)
                   const Padding(
                     padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    child: Text('Queue is empty'),
+                    child: Text('No participants listed'),
                   )
                 else
-                  for (var i = 0; i < state.queue.length; i++)
-                    _QueueTile(
-                      index: i + 1,
-                      item: state.queue[i],
-                      onRemove: (state.canPlayback || isHost)
-                          ? () => unawaited(provider.removeFromUburoomQueue(state.queue[i].id))
-                          : null,
-                    ),
+                  for (final p in state.participants) _ParticipantTile(participant: p, viewerId: provider.viewerId),
               ],
             ),
           ),
-        _Card(
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          const SizedBox(height: 16),
+          WatchButtonRow(
+            alignment: WrapAlignment.center,
             children: [
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        'Participants (${state.participants.length})',
-                        style: theme.textTheme.titleSmall?.copyWith(color: theme.colorScheme.primary),
-                      ),
-                    ),
-                  ],
-                ),
+              WatchButton(
+                label: t.watchTogether.leaveRoom,
+                icon: Symbols.logout_rounded,
+                onPressed: () => unawaited(confirmLeaveRoom(context)),
               ),
-              const SizedBox(height: 8),
-              if (state.participants.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  child: Text('No participants listed'),
-                )
-              else
-                for (final p in state.participants) _ParticipantTile(participant: p, viewerId: provider.viewerId),
+              if (isHost)
+                WatchButton(
+                  label: t.watchTogether.endRoom,
+                  icon: Symbols.cancel_rounded,
+                  style: WatchButtonStyle.tonal,
+                  onPressed: () => unawaited(confirmEndRoom(context)),
+                ),
             ],
           ),
-        ),
-        const SizedBox(height: 16),
-        WatchButtonRow(
-          alignment: WrapAlignment.center,
-          children: [
-            WatchButton(
-              label: t.watchTogether.leaveRoom,
-              icon: Symbols.logout_rounded,
-              onPressed: () => unawaited(confirmLeaveRoom(context)),
-            ),
-            if (isHost)
-              WatchButton(
-                label: t.watchTogether.endRoom,
-                icon: Symbols.cancel_rounded,
-                style: WatchButtonStyle.tonal,
-                onPressed: () => unawaited(confirmEndRoom(context)),
-              ),
-          ],
-        ),
-      ],
+        ],
+      ),
     );
   }
 

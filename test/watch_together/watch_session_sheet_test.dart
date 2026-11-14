@@ -556,11 +556,18 @@ void main() {
         expect(find.text('Sci-Fi · Action'), findsOneWidget);
         expect(find.text('Playing downloaded local file'), findsOneWidget);
         expect(find.text(t.common.play), findsOneWidget);
-        expect(find.text(t.watchTogether.stopMedia), findsOneWidget);
+        expect(find.text(t.watchTogether.stopMedia), findsNothing);
 
+        // Let the earlier copy-code snackbar clear before tapping the shorter media page.
+        await tester.pump(const Duration(seconds: 5));
+        await settleWatchFrames(tester);
         // Tap Play
-        await _tap(tester, find.text(t.common.play));
-        expect(socket.sentRequests.any((r) => (r['data']?['command']?['action'] ?? '') == 'media.play'), isTrue);
+        await _tap(tester, find.widgetWithText(OutlinedButton, t.common.play), warnIfMissed: true);
+        expect(
+          socket.sentRequests.any((r) => (r['data']?['command']?['action'] ?? '') == 'media.play'),
+          isTrue,
+          reason: '${socket.sentRequests} connected=${provider.isConnected} control=${provider.canControl}',
+        );
 
         await _back(tester);
         expect(find.byType(WatchSessionSheet), findsOneWidget);
@@ -692,6 +699,11 @@ void main() {
         serverUrl: 'http://localhost:6767',
         token: 'test-token',
       );
+      socket.queueItems = [
+        {'id': 'q-1', 'mediaId': 'media-2', 'serverId': 'server-1', 'title': 'Blade Runner 2049', 'subtitle': 'Sci-Fi'},
+        {'id': 'q-2', 'mediaId': 'media-3', 'serverId': 'server-1', 'title': 'Arrival', 'subtitle': ''},
+      ];
+      socket.queueRevision = 1;
       final snapshot = {
         'id': 'room-ubu-queue',
         'roomName': 'Queue Test Room',
@@ -705,17 +717,12 @@ void main() {
         'canPlayback': true,
         'canManage': false,
         'viewers': 1,
-        'autoQueue': true,
-        'queue': [
-          {
-            'id': 'q-1',
-            'mediaId': 'media-2',
-            'serverId': 'server-1',
-            'title': 'Blade Runner 2049',
-            'subtitle': 'Sci-Fi',
-          },
-          {'id': 'q-2', 'mediaId': 'media-3', 'serverId': 'server-1', 'title': 'Arrival', 'subtitle': ''},
-        ],
+        'hasNext': true,
+        'queueSummary': {
+          'pendingCount': 2,
+          'queueRevision': 1,
+          'autoQueue': {'mode': 'continue'},
+        },
         'participants': [
           {'id': 'viewer-1', 'name': 'Viewer', 'role': 'viewer', 'isHost': false, 'present': true},
         ],
@@ -757,6 +764,17 @@ void main() {
         serverUrl: 'http://localhost:6767',
         token: 'test-token',
       );
+      socket.queueItems = [
+        {
+          'id': 'q-ops-1',
+          'mediaId': 'media-2',
+          'serverId': 'server-1',
+          'title': 'Blade Runner 2049',
+          'subtitle': 'Sci-Fi',
+        },
+        {'id': 'q-ops-2', 'mediaId': 'media-3', 'serverId': 'server-1', 'title': 'Arrival', 'subtitle': ''},
+      ];
+      socket.queueRevision = 1;
       final snapshot = {
         'id': 'room-ubu-queue-ops',
         'roomName': 'Queue Ops Room',
@@ -770,17 +788,12 @@ void main() {
         'canPlayback': true,
         'canManage': true,
         'viewers': 1,
-        'autoQueue': true,
-        'queue': [
-          {
-            'id': 'q-ops-1',
-            'mediaId': 'media-2',
-            'serverId': 'server-1',
-            'title': 'Blade Runner 2049',
-            'subtitle': 'Sci-Fi',
-          },
-          {'id': 'q-ops-2', 'mediaId': 'media-3', 'serverId': 'server-1', 'title': 'Arrival', 'subtitle': ''},
-        ],
+        'hasNext': true,
+        'queueSummary': {
+          'pendingCount': 2,
+          'queueRevision': 1,
+          'autoQueue': {'mode': 'continue'},
+        },
         'participants': [
           {'id': 'viewer-host-1', 'name': 'Host', 'role': 'host', 'isHost': true, 'present': true},
         ],
@@ -844,6 +857,9 @@ void main() {
 }
 
 class _TestUburoomSocket extends UburoomSocketService {
+  List<Map<String, dynamic>> queueItems = [];
+  int queueRevision = 0;
+
   _TestUburoomSocket({required super.clockSync});
 
   final stateController = StreamController<UburoomRoomStatePush>.broadcast();
@@ -886,6 +902,13 @@ class _TestUburoomSocket extends UburoomSocketService {
   /// Answers one request by its name (see uburoom_test_requests.dart).
   Future<UburoomResponse> answer(String name, [Map<String, dynamic>? data]) async {
     sentRequests.add({'request': name, 'data': data});
+    if (name == 'room.queue') {
+      return UburoomResponse(
+        id: 1,
+        status: 200,
+        value: {'items': queueItems, 'total': queueItems.length, 'queueRevision': queueRevision},
+      );
+    }
     if (name == 'join' && currentSnapshot.isNotEmpty) {
       return UburoomResponse(id: 1, status: 200, value: currentSnapshot);
     }
@@ -926,7 +949,8 @@ void _uburoomTest(
     clockSync.add(clockSync.begin(), {
       'serverReceivedAt': clockSync.serverNow,
       'serverSentAt': clockSync.serverNow,
-      'serverProcessingMs': 0, 'clockEpoch': 'fixture',
+      'serverProcessingMs': 0,
+      'clockEpoch': 'fixture',
     });
     final socket = _TestUburoomSocket(clockSync: clockSync);
     final auth = _FakeAuthService();

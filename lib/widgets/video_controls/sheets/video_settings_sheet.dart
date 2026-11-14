@@ -818,7 +818,7 @@ class _VideoSettingsSheetState extends State<VideoSettingsSheet> {
       shrinkWrap: true,
       children: [
         // Playback Speed - hidden for live TV and when user cannot control playback
-        if (_state.canControl && !_state.isLive)
+        if (_state.canControl && !_state.isLive && !_isUburoomPlayback())
           StreamBuilder<double>(
             stream: widget.player.streams.rate,
             initialData: widget.player.state.rate,
@@ -1129,8 +1129,16 @@ class _VideoSettingsSheetState extends State<VideoSettingsSheet> {
     );
   }
 
-  /// The rate the user chose, as opposed to what the player is momentarily
-  /// running at: a Watch Together drift nudge is not a speed setting.
+  /// Uburoom reserves rate for correction only while following this player.
+  bool _isUburoomPlayback() {
+    try {
+      return context.select<WatchTogetherProvider, bool>((session) => session.isUburoomSession && session.syncOwnsRate);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// A local correction is not a user-selected playback speed.
   double _displayedRate(double playerRate) {
     try {
       final session = context.read<WatchTogetherProvider>();

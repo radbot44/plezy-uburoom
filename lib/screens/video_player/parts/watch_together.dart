@@ -213,8 +213,8 @@ extension _VideoPlayerWatchTogetherMethods on VideoPlayerScreenState {
     };
   }
 
-  /// Applies a user-chosen rate. While the room drives this player the room
-  /// takes it, and everyone plays at it. Every deliberate rate change (speed
+  /// Applies a user-chosen rate. Uburoom reserves rate for local correction.
+  /// Every deliberate rate change (speed
   /// sheet, keyboard, long-press 2x, media controls) goes through here.
   Future<void> _setPlaybackRate(double rate) {
     final currentPlayer = player;
