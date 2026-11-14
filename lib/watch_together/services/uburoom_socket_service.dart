@@ -114,7 +114,7 @@ class UburoomSocketService {
   int _seq = 0;
 
   final Map<int, Completer<UburoomResponse>> _inflight = {};
-  final Map<int, int> _clockSentAt = {};
+  final Map<int, ClockRequest> _clockSentAt = {};
   Completer<void>? _authCompleter;
 
   /// Why the server refused this client's protocol version, once it has.
@@ -233,10 +233,10 @@ class UburoomSocketService {
   void _sendClockPing() {
     if (!isConnected) return;
     final id = ++_seq;
-    final now = DateTime.now().millisecondsSinceEpoch;
-    _clockSentAt[id] = now;
+    final ping = clockSync.begin();
+    _clockSentAt[id] = ping;
     // Clean up stale clock pings older than 10 seconds
-    _clockSentAt.removeWhere((_, sendAt) => now - sendAt > 10000);
+    _clockSentAt.removeWhere((_, sendAt) => ping.sent - sendAt.sent > 10000);
     _sendRaw({'type': 'clock', 'id': id});
   }
 
@@ -268,13 +268,14 @@ class UburoomSocketService {
     String viewerId, {
     String? quality,
     String? delivery,
+    Map<String, dynamic> preferences = const {},
     Duration timeout = const Duration(seconds: 35),
   }) async {
     final response = await request({
       'type': 'join',
       'roomId': roomId,
       'viewerId': viewerId,
-      'preferences': {'quality': ?quality, 'delivery': ?delivery},
+      'preferences': {...preferences, 'quality': ?quality, 'delivery': ?delivery},
     }, timeout: timeout);
     final value = response.value;
     if (!response.isSuccess || value is! Map) return response;
@@ -434,6 +435,7 @@ class UburoomSocketService {
     String? confidence,
     num? measurementFreshnessMs,
     String? reason,
+    Map<String, dynamic>? health,
   }) {
     if (!isConnected) return;
     final Map<String, dynamic> msg = {
@@ -448,6 +450,7 @@ class UburoomSocketService {
     if (confidence != null) msg['confidence'] = confidence;
     if (measurementFreshnessMs != null) msg['measurementFreshnessMs'] = measurementFreshnessMs;
     if (reason != null) msg['reason'] = reason;
+    if (health != null) msg['health'] = health;
 
     _sendRaw(msg);
   }
@@ -480,15 +483,7 @@ class UburoomSocketService {
             final sendAt = _clockSentAt.remove(id);
             if (sendAt != null) {
               final timing = json['timing'] as Map<String, dynamic>?;
-              final serverNow = (json['serverNow'] as num?)?.toInt() ?? DateTime.now().millisecondsSinceEpoch;
-              clockSync.addSample(
-                localSendAt: sendAt,
-                serverReceivedAt: (timing?['serverReceivedAt'] as num?)?.toInt() ?? serverNow,
-                serverSentAt: (timing?['serverSentAt'] as num?)?.toInt() ?? serverNow,
-                serverProcessingMs: (timing?['serverProcessingMs'] as num?)?.toDouble() ?? 0.0,
-                localReceiveAt: DateTime.now().millisecondsSinceEpoch,
-                clockEpoch: timing?['clockEpoch'] ?? 0,
-              );
+              if (timing is Map<String, dynamic>) clockSync.add(sendAt, timing);
             }
           }
           break;
@@ -574,6 +569,7 @@ class UburoomSocketService {
     }
     _burstTimers.clear();
     _clockSentAt.clear();
+    clockSync.reset();
 
     for (final completer in _inflight.values) {
       if (!completer.isCompleted) {

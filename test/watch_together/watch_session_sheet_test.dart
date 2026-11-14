@@ -923,14 +923,11 @@ void _uburoomTest(
     });
     final db = AppDatabase.forTesting(NativeDatabase.memory());
     final clockSync = ClockSync();
-    clockSync.addSample(
-      localSendAt: 1000,
-      serverReceivedAt: 1005,
-      serverSentAt: 1005,
-      localReceiveAt: 1010,
-      serverProcessingMs: 0,
-      clockEpoch: 1,
-    );
+    clockSync.add(clockSync.begin(), {
+      'serverReceivedAt': clockSync.serverNow,
+      'serverSentAt': clockSync.serverNow,
+      'serverProcessingMs': 0, 'clockEpoch': 'fixture',
+    });
     final socket = _TestUburoomSocket(clockSync: clockSync);
     final auth = _FakeAuthService();
     final provider = WatchTogetherProvider(

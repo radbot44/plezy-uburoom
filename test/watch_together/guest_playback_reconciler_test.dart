@@ -88,6 +88,7 @@ class _TestSocketService extends UburoomSocketService {
     String? confidence,
     num? measurementFreshnessMs,
     String? reason,
+    Map<String, dynamic>? health,
   }) {
     final map = <String, dynamic>{
       'roomId': roomId,
@@ -100,12 +101,17 @@ class _TestSocketService extends UburoomSocketService {
     if (confidence != null) map['confidence'] = confidence;
     if (measurementFreshnessMs != null) map['measurementFreshnessMs'] = measurementFreshnessMs;
     if (reason != null) map['reason'] = reason;
+    if (health != null) map['health'] = health;
     syncQualities.add(map);
   }
 }
 
 class _SyncPlayer extends FakeSyncPlayer {
-  _SyncPlayer({super.playing, super.position, super.hasRenderedFrame, this.completedStream});
+  _SyncPlayer({super.playing, super.position, super.hasRenderedFrame, this.completedStream, this.renderedFrames});
+
+  int? renderedFrames;
+  @override
+  Future<Map<String, dynamic>> getStats() async => {if (renderedFrames != null) 'videoRenderedFrames': renderedFrames};
 
   final Stream<bool>? completedStream;
 
@@ -128,22 +134,14 @@ WatchCopy _testCopy() {
 }
 
 void _seedClock(ClockSync clockSync) {
-  clockSync.addSample(
-    localSendAt: 1000,
-    serverReceivedAt: 1005,
-    serverSentAt: 1005,
-    serverProcessingMs: 0,
-    localReceiveAt: 1010,
-    clockEpoch: '1',
-  );
-  clockSync.addSample(
-    localSendAt: 2000,
-    serverReceivedAt: 2005,
-    serverSentAt: 2005,
-    serverProcessingMs: 0,
-    localReceiveAt: 2010,
-    clockEpoch: '1',
-  );
+  final request = clockSync.begin();
+  final now = clockSync.serverNow;
+  clockSync.add(request, {
+    'serverReceivedAt': now,
+    'serverSentAt': now,
+    'serverProcessingMs': 0,
+    'clockEpoch': 'fixture',
+  });
 }
 
 void main() {
@@ -180,7 +178,7 @@ void main() {
           'mediaVersion': 'mv-1',
           'streamVersion': 'sv-1',
           'waitingForReady': true,
-          'readiness': {'version': 5},
+          'readinessVersion': 5,
           'state': {'paused': true, 'rate': 1.0},
         });
 
@@ -232,8 +230,9 @@ void main() {
           'streamVersion': 'sv-1',
           'waitingForReady': false,
           'startAt': serverNow + 500,
-          'pauseAt': 0,
-          'state': {'paused': false, 'rate': 1.0},
+          'pauseAt': null,
+          'serverNow': clockSync.serverNow,
+          'state': {'paused': false, 'position': 5.0, 'duration': 7200.0},
         });
 
         async.elapse(const Duration(milliseconds: 200));
@@ -242,60 +241,6 @@ void main() {
         async.elapse(const Duration(milliseconds: 350));
         async.flushMicrotasks();
         expect(player.state.playing, isTrue);
-
-        reconciler.dispose();
-      });
-    });
-
-    test('reconciles drift with slew rate between 350ms and 2000ms', () {
-      fakeAsync((async) {
-        final clockSync = ClockSync();
-        _seedClock(clockSync);
-
-        final socketService = _TestSocketService(clockSync: clockSync);
-        // Player is at 1000ms, playing
-        final player = _SyncPlayer(hasRenderedFrame: true, playing: true, position: const Duration(milliseconds: 1000));
-        final rates = <double>[];
-        final adapter = PlezyPlayerAdapter(
-          player: player,
-          copy: _testCopy(),
-          commands: PlayerCommands(
-            play: () => player.play(),
-            pause: () => player.pause(),
-            seek: (pos) => player.seek(pos),
-            setRate: (rate) async {
-              rates.add(rate);
-              return player.setRate(rate);
-            },
-          ),
-        );
-
-        final reconciler = GuestPlaybackReconciler(
-          adapter: adapter,
-          clockSync: clockSync,
-          socketService: socketService,
-          roomId: 'room-1',
-          viewerId: 'viewer-1',
-        );
-
-        // Room target is 1600ms (drift = 600ms behind -> slew rate 1.04)
-        final serverNow = clockSync.serverNow;
-        reconciler.updateRoomSnapshot({
-          'epoch': 1,
-          'revision': 1,
-          'mediaVersion': 'mv-1',
-          'streamVersion': 'sv-1',
-          'waitingForReady': false,
-          'startAt': serverNow - 1600,
-          'pauseAt': 0,
-          'state': {'paused': false, 'rate': 1.0},
-        });
-
-        // Advance 250ms for tick timer
-        async.elapse(const Duration(milliseconds: 260));
-        async.flushMicrotasks();
-
-        expect(rates, contains(1.04));
 
         reconciler.dispose();
       });
@@ -340,8 +285,9 @@ void main() {
           'streamVersion': 'sv-1',
           'waitingForReady': false,
           'startAt': serverNow - 5000,
-          'pauseAt': 0,
-          'state': {'paused': false, 'rate': 1.0},
+          'pauseAt': null,
+          'serverNow': clockSync.serverNow,
+          'state': {'paused': false, 'position': 5.0, 'duration': 7200.0},
         });
 
         async.elapse(const Duration(milliseconds: 260));
@@ -354,97 +300,104 @@ void main() {
       });
     });
 
-    test('observe sends the full 11-field observation at 1s periodic cadence', () {
-      fakeAsync((async) {
-        final clockSync = ClockSync();
-        _seedClock(clockSync);
+    for (final realFrames in [false, true]) {
+      test('observe sends truthful frames ($realFrames) at 1s periodic cadence', () {
+        fakeAsync((async) {
+          final clockSync = ClockSync();
+          _seedClock(clockSync);
 
-        final socketService = _TestSocketService(clockSync: clockSync);
-        final player = _SyncPlayer(
-          hasRenderedFrame: true,
-          playing: true,
-          position: const Duration(milliseconds: 120500),
-        );
-        final adapter = PlezyPlayerAdapter(
-          player: player,
-          copy: _testCopy(),
-          commands: PlayerCommands(
-            play: () => player.play(),
-            pause: () => player.pause(),
-            seek: (pos) => player.seek(pos),
-            setRate: (rate) => player.setRate(rate),
-          ),
-        );
+          final socketService = _TestSocketService(clockSync: clockSync);
+          final player = _SyncPlayer(
+            hasRenderedFrame: true,
+            renderedFrames: realFrames ? 120 : null,
+            playing: true,
+            position: const Duration(milliseconds: 120500),
+          );
+          final advance = Timer.periodic(
+            const Duration(milliseconds: 50),
+            (_) => player.advanceBy(const Duration(milliseconds: 50)),
+          );
+          final adapter = PlezyPlayerAdapter(
+            player: player,
+            copy: _testCopy(),
+            commands: PlayerCommands(
+              play: () => player.play(),
+              pause: () => player.pause(),
+              seek: (pos) => player.seek(pos),
+              setRate: (rate) => player.setRate(rate),
+            ),
+          );
 
-        final reconciler = GuestPlaybackReconciler(
-          adapter: adapter,
-          clockSync: clockSync,
-          socketService: socketService,
-          roomId: 'room-1',
-          viewerId: 'viewer-1',
-        );
+          final reconciler = GuestPlaybackReconciler(
+            adapter: adapter,
+            clockSync: clockSync,
+            socketService: socketService,
+            roomId: 'room-1',
+            viewerId: 'viewer-1',
+          );
 
-        final serverNow = clockSync.serverNow;
-        reconciler.updateRoomSnapshot({
-          'epoch': 'epoch-uuid-2',
-          'revision': 4,
-          'mediaVersion': 'mv-10',
-          'streamVersion': 'sv-20',
-          'observationEpoch': 'oe-99',
-          'waitingForReady': false,
-          'startAt': serverNow - 120500,
-          'pauseAt': serverNow,
-          'state': {'paused': false, 'rate': 1.0, 'position': 120.5, 'duration': 7200.0},
+          final serverNow = clockSync.serverNow;
+          reconciler.updateRoomSnapshot({
+            'epoch': 'epoch-uuid-2',
+            'revision': 4,
+            'mediaVersion': 'mv-10',
+            'streamVersion': 'sv-20',
+            'observationEpoch': 'oe-99',
+            'waitingForReady': false,
+            'startAt': serverNow - 120500,
+            'serverNow': clockSync.serverNow,
+            'state': {'paused': false, 'rate': 1.0, 'position': 120.5, 'duration': 7200.0},
+          });
+
+          // 1s periodic timer tick
+          async.elapse(const Duration(milliseconds: 1000));
+          async.flushMicrotasks();
+
+          final observeRequests = socketService.requests.where((r) => r['request'] == 'observe').toList();
+
+          expect(observeRequests, hasLength(1));
+          expect(reconciler.epoch, 'epoch-uuid-2');
+          final body = observeRequests.first['body'] as Map<String, dynamic>;
+
+          // Verify all 11 fields strictly matching server/playback-tracking.js; the viewer
+          // travels on the observe message itself.
+          expect(body.containsKey('viewerId'), isFalse);
+          expect(body['epoch'], 'epoch-uuid-2');
+          expect(body['mediaVersion'], 'mv-10');
+          expect(body['streamVersion'], 'sv-20');
+          expect(body['observationEpoch'], 'oe-99');
+          expect(body['sequence'], 1);
+          expect(body['sampleAt'], isA<double>());
+          expect(body['observedAt'], isA<int>());
+          expect(body['position'] as double, closeTo(121.5, 0.1)); // position in seconds double
+          expect(body['rate'], 1.0);
+          expect(body['frames'], isA<int>());
+          expect(body['frames'], realFrames ? 120 : 0);
+          expect(body['discontinuity'], 0);
+          expect(body['state'], 'playing');
+
+          final prevSampleAt = body['sampleAt'] as double;
+
+          player.renderedFrames = realFrames ? 144 : null;
+          // Advance another 1s for sequence 2
+          async.elapse(const Duration(milliseconds: 1000));
+          async.flushMicrotasks();
+
+          final updatedObserve = socketService.requests.where((r) => r['request'] == 'observe').toList();
+          expect(updatedObserve, hasLength(2));
+          final secondBody = updatedObserve[1]['body'] as Map<String, dynamic>;
+
+          expect(secondBody['sequence'], 2);
+          expect(secondBody['sampleAt'] as double, greaterThan(prevSampleAt));
+          expect(secondBody['frames'], realFrames ? 144 : 0);
+          expect(secondBody['discontinuity'], 0);
+          expect(secondBody['state'], 'playing');
+
+          advance.cancel();
+          reconciler.dispose();
         });
-
-        // 1s periodic timer tick
-        async.elapse(const Duration(milliseconds: 1000));
-        async.flushMicrotasks();
-
-        final observeRequests = socketService.requests.where((r) => r['request'] == 'observe').toList();
-
-        expect(observeRequests, hasLength(1));
-        expect(reconciler.epoch, 'epoch-uuid-2');
-        final body = observeRequests.first['body'] as Map<String, dynamic>;
-
-        // Verify all 11 fields strictly matching server/playback-tracking.js; the viewer
-        // travels on the observe message itself.
-        expect(body.containsKey('viewerId'), isFalse);
-        expect(body['epoch'], 'epoch-uuid-2');
-        expect(body['mediaVersion'], 'mv-10');
-        expect(body['streamVersion'], 'sv-20');
-        expect(body['observationEpoch'], 'oe-99');
-        expect(body['sequence'], 1);
-        expect(body['sampleAt'], isA<double>());
-        expect(body['observedAt'], isA<int>());
-        expect(body['position'], 120.5); // position in seconds double
-        expect(body['rate'], 1.0);
-        expect(body['frames'], isA<int>());
-        expect(body['frames'] as int, greaterThanOrEqualTo(1));
-        expect(body['discontinuity'], 0);
-        expect(body['state'], 'playing');
-
-        final prevSampleAt = body['sampleAt'] as double;
-        final prevFrames = body['frames'] as int;
-
-        // Advance another 1s for sequence 2
-        async.elapse(const Duration(milliseconds: 1000));
-        async.flushMicrotasks();
-
-        final updatedObserve = socketService.requests.where((r) => r['request'] == 'observe').toList();
-        expect(updatedObserve, hasLength(2));
-        final secondBody = updatedObserve[1]['body'] as Map<String, dynamic>;
-
-        expect(secondBody['sequence'], 2);
-        expect(secondBody['sampleAt'] as double, greaterThan(prevSampleAt));
-        expect(secondBody['frames'] as int, greaterThan(prevFrames));
-        expect(secondBody['discontinuity'], 0);
-        expect(secondBody['state'], 'playing');
-
-        reconciler.dispose();
       });
-    });
-
+    }
     test('natural ended transition does not increment discontinuity', () {
       fakeAsync((async) {
         final clockSync = ClockSync();
@@ -479,6 +432,7 @@ void main() {
 
         final serverNow = clockSync.serverNow;
         reconciler.updateRoomSnapshot({
+          'serverNow': clockSync.serverNow,
           'epoch': 1,
           'mediaVersion': 'mv-1',
           'streamVersion': 'sv-1',
@@ -488,6 +442,10 @@ void main() {
           'state': {'paused': false, 'rate': 1.0, 'position': 100.0, 'duration': 7200.0},
         });
 
+        final advance = Timer.periodic(
+          const Duration(milliseconds: 50),
+          (_) => player.advanceBy(const Duration(milliseconds: 50)),
+        );
         // 1s periodic observe
         async.elapse(const Duration(milliseconds: 1000));
         async.flushMicrotasks();
@@ -509,6 +467,7 @@ void main() {
         // Critical: discontinuity must remain identical (0) to allow automatic queue advancement
         expect(observeEnded['discontinuity'], 0);
 
+        advance.cancel();
         reconciler.dispose();
         completedController.close();
       });
@@ -542,6 +501,7 @@ void main() {
 
         final serverNow = clockSync.serverNow;
         reconciler.updateRoomSnapshot({
+          'serverNow': clockSync.serverNow,
           'epoch': 1,
           'mediaVersion': 'mv-1',
           'streamVersion': 'sv-1',
@@ -574,7 +534,8 @@ void main() {
           'streamVersion': 'sv-1',
           'observationEpoch': 'epoch-beta',
           'waitingForReady': false,
-          'state': {'paused': false, 'rate': 1.0},
+          'serverNow': clockSync.serverNow,
+          'state': {'paused': false, 'position': 5.0, 'duration': 7200.0},
         });
 
         async.elapse(const Duration(milliseconds: 1000));
@@ -589,81 +550,7 @@ void main() {
       });
     });
 
-    test('scales elapsed time and slew rate correctly for non-1.0 room rate', () {
-      fakeAsync((async) {
-        final clockSync = ClockSync();
-        _seedClock(clockSync);
-
-        final socketService = _TestSocketService(clockSync: clockSync);
-        double? lastSetRate;
-        final player = _SyncPlayer(
-          hasRenderedFrame: true,
-          playing: true,
-          position: const Duration(milliseconds: 10000),
-        );
-        final adapter = PlezyPlayerAdapter(
-          player: player,
-          copy: _testCopy(),
-          commands: PlayerCommands(
-            play: () => player.play(),
-            pause: () => player.pause(),
-            seek: (pos) => player.seek(pos),
-            setRate: (rate) async {
-              lastSetRate = rate;
-              await player.setRate(rate);
-            },
-          ),
-        );
-
-        final reconciler = GuestPlaybackReconciler(
-          adapter: adapter,
-          clockSync: clockSync,
-          socketService: socketService,
-          roomId: 'room-1',
-          viewerId: 'viewer-1',
-        );
-
-        final serverNow = clockSync.serverNow;
-        // Room rate is 1.5. Snapshot taken 10s ago at (serverNow - 10000) with position 10.0s.
-        reconciler.updateRoomSnapshot({
-          'epoch': 'epoch-1.5',
-          'revision': 1,
-          'mediaVersion': 'mv-1',
-          'streamVersion': 'sv-1',
-          'observationEpoch': 'oe-1.5',
-          'waitingForReady': false,
-          'serverNow': serverNow - 10000,
-          'startAt': serverNow - 10000,
-          'state': {'paused': false, 'rate': 1.5, 'position': 10.0, 'duration': 7200.0},
-        });
-
-        // At 1.5x rate, 10s of elapsed server time should advance timeline by 15s (from 10s to 25s = 25000ms)
-        expect(reconciler.targetPositionMs, 25000);
-
-        // Player is at 10000ms, set player to 24500ms (drift = 24500 - 25000 = -500ms).
-        player.seek(const Duration(milliseconds: 24500));
-        // Run reconciler tick (250ms cadence)
-        async.elapse(const Duration(milliseconds: 260));
-        async.flushMicrotasks();
-
-        // Drift is -500ms (behind target by 500ms, within 350-2000ms slew window).
-        // Slew factor should be 1.04. Target slew = 1.5 * 1.04 = 1.56.
-        expect(lastSetRate, closeTo(1.56, 0.001));
-
-        // Wait for 1s periodic observation tick
-        async.elapse(const Duration(milliseconds: 1000));
-        async.flushMicrotasks();
-
-        final observeRequests = socketService.requests.where((r) => r['request'] == 'observe').toList();
-        expect(observeRequests, isNotEmpty);
-        final body = observeRequests.last['body'] as Map<String, dynamic>;
-        // Observation rate must report actual playback rate (1.56), NOT double-multiplied (2.34)
-        expect(body['rate'] as double, closeTo(1.56, 0.001));
-
-        reconciler.dispose();
-      });
-    });
-    test('falls back to guarded seek above 750ms drift when audioPassthroughActive disables rate slewing', () {
+    test('falls back to guarded seek above 650ms drift when audioPassthroughActive disables rate slewing', () {
       fakeAsync((async) {
         final clockSync = ClockSync();
         _seedClock(clockSync);
@@ -708,10 +595,10 @@ void main() {
           'mediaVersion': 'mv-1',
           'streamVersion': 'sv-1',
           'waitingForReady': false,
-          'serverNow': serverNow,
+          'serverNow': clockSync.serverNow,
           'startAt': serverNow - 2000,
-          'pauseAt': 0,
-          'state': {'paused': false, 'rate': 1.0, 'position': 2.0},
+          'pauseAt': null,
+          'state': {'paused': false, 'rate': 1.0, 'position': 2.0, 'duration': 7200.0},
         });
 
         // Two 100ms ticks to satisfy persistence check
@@ -720,7 +607,7 @@ void main() {
 
         expect(rates, isEmpty, reason: 'cannot slew rate during audio passthrough');
         expect(seeks, hasLength(1));
-        expect(seeks.first.inMilliseconds, closeTo(2200, 50));
+        expect(seeks.first.inMilliseconds, closeTo(2100, 50));
 
         reconciler.dispose();
       });
@@ -760,10 +647,10 @@ void main() {
           'mediaVersion': 'mv-1',
           'streamVersion': 'sv-1',
           'waitingForReady': false,
-          'serverNow': serverNow,
+          'serverNow': clockSync.serverNow,
           'startAt': serverNow - 2000,
-          'pauseAt': 0,
-          'state': {'paused': false, 'rate': 1.0, 'position': 2.0},
+          'pauseAt': null,
+          'state': {'paused': false, 'rate': 1.0, 'position': 2.0, 'duration': 7200.0},
         });
 
         async.elapse(const Duration(milliseconds: 1000));
@@ -822,10 +709,10 @@ void main() {
             'mediaVersion': 'mv-1',
             'streamVersion': 'sv-1',
             'waitingForReady': false,
-            'serverNow': serverNow,
+            'serverNow': clockSync.serverNow,
             'startAt': serverNow - 5000,
-            'pauseAt': 0,
-            'state': {'paused': false, 'rate': 1.0, 'position': 5.0},
+            'pauseAt': null,
+            'state': {'paused': false, 'rate': 1.0, 'position': 5.0, 'duration': 7200.0},
           });
 
           // Player is playing at 5000ms, sync quality sent for playing
@@ -834,7 +721,7 @@ void main() {
           expect(socketService.syncQualities.last['status'], 'playing');
 
           // Advance playback slightly: player moves to 5600ms
-          player.seek(const Duration(milliseconds: 5600));
+          player.seek(const Duration(milliseconds: 5800));
           seeks.clear();
 
           // Host pauses room at 5000ms (state.position = 5.0s, drift = 600ms > 250ms)
@@ -844,9 +731,9 @@ void main() {
             'mediaVersion': 'mv-1',
             'streamVersion': 'sv-1',
             'waitingForReady': false,
-            'serverNow': serverNow + 600,
+            'serverNow': clockSync.serverNow + 600,
             'pauseAt': serverNow,
-            'state': {'paused': true, 'rate': 1.0, 'position': 5.0},
+            'state': {'paused': true, 'rate': 1.0, 'position': 5.0, 'duration': 7200.0},
           });
 
           async.flushMicrotasks();
@@ -872,6 +759,11 @@ void main() {
 
         final socketService = _TestSocketService(clockSync: clockSync);
         final player = _SyncPlayer(hasRenderedFrame: true, playing: true, position: const Duration(milliseconds: 1000));
+        player.setBuffer(const Duration(seconds: 60));
+        final advance = Timer.periodic(
+          const Duration(milliseconds: 50),
+          (_) => player.advanceBy(const Duration(milliseconds: 50)),
+        );
         final rates = <double>[];
         final adapter = PlezyPlayerAdapter(
           player: player,
@@ -904,19 +796,21 @@ void main() {
           'mediaVersion': 'mv-1',
           'streamVersion': 'sv-1',
           'waitingForReady': false,
-          'startAt': serverNow - 1600,
-          'pauseAt': 0,
-          'state': {'paused': false, 'rate': 1.0},
+          'startAt': serverNow - 1200,
+          'pauseAt': null,
+          'serverNow': clockSync.serverNow,
+          'state': {'paused': false, 'position': 1.2, 'duration': 7200.0},
         });
 
         // Run tick so reconciler starts slewing
-        async.elapse(const Duration(milliseconds: 260));
+        async.elapse(const Duration(milliseconds: 660));
         async.flushMicrotasks();
 
         expect(reconciler.isSlewing, isTrue);
-        expect(rates.last, equals(1.04));
+        expect(rates.last, greaterThan(1.0));
 
         // Disposing while slewing must immediately restore rate to 1.0
+        advance.cancel();
         reconciler.dispose();
         async.flushMicrotasks();
 
@@ -950,7 +844,8 @@ void main() {
         'observationEpoch': 'oe-test',
         'waitingForReady': false,
         'startAt': clockSync.serverNow,
-        'state': {'paused': false, 'rate': 1.0},
+        'serverNow': clockSync.serverNow,
+        'state': {'paused': false, 'position': 5.0, 'duration': 7200.0},
       };
 
       provider.handleUburoomSnapshotForTest(snapshot);
@@ -983,11 +878,13 @@ void main() {
       final snapshot = {
         'epoch': '3886f4cb-20d4-4a49-a29d-4766e4a2a6d8',
         'revision': 5,
-        'media': {'id': '12345', 'title': 'The Matrix', 'duration': 7200000, 'kind': 'movie'},
+        'mediaId': '12345',
+        'title': 'The Matrix',
         'mediaUrl': '/api/watch/media/grant-abc/start',
         'waitingForReady': false,
         'startAt': clockSync.serverNow,
-        'state': {'paused': false, 'rate': 1.0},
+        'serverNow': clockSync.serverNow,
+        'state': {'paused': false, 'position': 5.0, 'duration': 7200.0},
       };
 
       provider.handleUburoomSnapshotForTest(snapshot);
@@ -1020,12 +917,14 @@ void main() {
       final snapshot = {
         'epoch': '3886f4cb-20d4-4a49-a29d-4766e4a2a6d8',
         'revision': 5,
-        'media': {'id': '12345', 'title': 'The Matrix', 'duration': 7200000, 'kind': 'movie'},
+        'mediaId': '12345',
+        'title': 'The Matrix',
         'mediaUrl': directPmsUrl,
         'directDelivery': true,
         'waitingForReady': false,
         'startAt': clockSync.serverNow,
-        'state': {'paused': false, 'rate': 1.0},
+        'serverNow': clockSync.serverNow,
+        'state': {'paused': false, 'position': 5.0, 'duration': 7200.0},
       };
 
       provider.handleUburoomSnapshotForTest(snapshot);
@@ -1037,81 +936,5 @@ void main() {
       expect(item!.raw?['uburoomMediaUrl'], directPmsUrl);
       expect(item.raw?['uburoomHeaders'], isEmpty);
     });
-
-    test(
-      'hysteresis micro-PLL slews mild drift (150ms) and exits only once inside tight exit band or zero-crossing',
-      () {
-        fakeAsync((async) {
-          final clockSync = ClockSync();
-          _seedClock(clockSync); // RTT = 10ms, uncertainty = 5ms -> enter ~50ms, exit ~15ms
-
-          final socketService = _TestSocketService(clockSync: clockSync);
-          final player = _SyncPlayer(
-            hasRenderedFrame: true,
-            playing: true,
-            position: const Duration(milliseconds: 1850),
-          );
-          final rates = <double>[];
-          final adapter = PlezyPlayerAdapter(
-            player: player,
-            copy: _testCopy(),
-            commands: PlayerCommands(
-              play: () => player.play(),
-              pause: () => player.pause(),
-              seek: (pos) => player.seek(pos),
-              setRate: (rate) async {
-                rates.add(rate);
-                return player.setRate(rate);
-              },
-            ),
-          );
-
-          final reconciler = GuestPlaybackReconciler(
-            adapter: adapter,
-            clockSync: clockSync,
-            socketService: socketService,
-            roomId: 'room-1',
-            viewerId: 'viewer-1',
-            listenToRoomStateStream: false,
-          );
-
-          // Target is 2000ms, player is at 1850ms (drift = -150ms, previously ignored by the old 350ms deadband!)
-          final serverNow = clockSync.serverNow;
-          reconciler.updateRoomSnapshot({
-            'epoch': 1,
-            'revision': 1,
-            'mediaVersion': 'mv-1',
-            'streamVersion': 'sv-1',
-            'waitingForReady': false,
-            'serverNow': serverNow,
-            'startAt': serverNow - 2000,
-            'pauseAt': 0,
-            'state': {'paused': false, 'rate': 1.0, 'position': 2.0},
-          });
-
-          // Two 100ms ticks to pass persistence check for mild drift (<250ms)
-          player.seek(const Duration(milliseconds: 1950)); // keep drift at -150ms as time advances
-          async.elapse(const Duration(milliseconds: 100));
-          player.seek(const Duration(milliseconds: 2050)); // still -150ms behind 2200ms target
-          async.elapse(const Duration(milliseconds: 100));
-          async.flushMicrotasks();
-
-          expect(reconciler.isSlewing, isTrue);
-          expect(rates, isNotEmpty);
-          expect(rates.last, greaterThan(1.0));
-          expect(rates.last, lessThan(1.04)); // Proportional slew (~1.01) instead of harsh 1.04 jump
-
-          // Now player catches up to within 10ms of target (2300ms target, player at 2295ms)
-          player.seek(const Duration(milliseconds: 2295));
-          async.elapse(const Duration(milliseconds: 100));
-          async.flushMicrotasks();
-
-          expect(reconciler.isSlewing, isFalse);
-          expect(rates.last, closeTo(1.0, 0.001));
-
-          reconciler.dispose();
-        });
-      },
-    );
   });
 }

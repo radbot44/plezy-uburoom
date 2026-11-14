@@ -184,12 +184,21 @@ void main() {
       final stateSub = service.roomStateStream.listen(pushes.add);
       final kickSub = service.roomKickedStream.listen(kicked.add);
 
-      final joining = service.join('room-1', 'viewer-1', quality: 'direct', delivery: 'auto');
+      const preferences = {
+        'subtitlePreference': 'off',
+        'subtitleMode': 'auto',
+        'audioPreference': 'language:eng',
+        'volume': 75,
+        'muted': false,
+        'plexReporting': true,
+        'plexWatchState': false,
+      };
+      final joining = service.join('room-1', 'viewer-1', quality: 'direct', delivery: 'auto', preferences: preferences);
       await Future<void>.delayed(const Duration(milliseconds: 10));
       final sent = lastSent('join');
       expect(sent['roomId'], equals('room-1'));
       expect(sent['viewerId'], equals('viewer-1'));
-      expect(sent['preferences'], equals({'quality': 'direct', 'delivery': 'auto'}));
+      expect(sent['preferences'], equals({...preferences, 'quality': 'direct', 'delivery': 'auto'}));
       fakeChannel.controller.add(
         jsonEncode({
           'type': 'ack',

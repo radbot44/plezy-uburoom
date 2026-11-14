@@ -1,219 +1,72 @@
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:plezy/watch_together/services/clock_sync.dart';
+import 'package:plezy/watch_together/services/drift_correction.dart';
 
 void main() {
-  group('ClockSync', () {
-    test('computes accurate offset with symmetric RTT and server processing', () {
-      final sync = ClockSync();
-      expect(sync.isSynchronized, isFalse);
-
-      sync.addSample(
-        localSendAt: 1000,
-        serverReceivedAt: 1050,
-        serverSentAt: 1060,
-        serverProcessingMs: 10.0,
-        localReceiveAt: 1110,
-        clockEpoch: 'epoch-1',
-      );
-      expect(sync.currentOffsetMs, closeTo(0.0, 0.01));
-      expect(sync.rttMs, closeTo(100.0, 0.01));
-      expect(sync.isSynchronized, isFalse); // Needs >= 2 samples
-
-      sync.addSample(
-        localSendAt: 2000,
-        serverReceivedAt: 2520,
-        serverSentAt: 2525,
-        serverProcessingMs: 5.0,
-        localReceiveAt: 2045,
-        clockEpoch: 'epoch-1',
-      );
-
-      expect(sync.isSynchronized, isTrue);
-      expect(sync.currentOffsetMs, greaterThan(300.0));
-      expect(sync.uncertaintyMs, greaterThanOrEqualTo(20.0));
+  // Expected outputs captured from uburoom shared/sync/timing.mjs, 2026-11-13.
+  final traces = jsonDecode(File('test/watch_together/fixtures/timing-v2.json').readAsStringSync()) as Map;
+  for (final scenario in traces['scenarios'] as List) {
+    test('web clock parity: ${scenario['name']}', () {
+      var mono = 0, wall = 1700000000000;
+      final clock = ClockSync(nowMs: () => wall, monotonicNowMs: () => mono);
+      for (final step in scenario['steps'] as List) {
+        mono += step[0] as int;
+        wall += step[0] as int;
+        final request = clock.begin();
+        mono += step[1] as int;
+        wall += step[1] as int;
+        expect(
+          clock.add(request, {
+            'serverReceivedAt': step[2],
+            'serverSentAt': step[3],
+            'serverProcessingMs': step[4],
+            'clockEpoch': step[5],
+          }),
+          step[6],
+        );
+        final actual = clock.read();
+        expect(actual.valid, step[7]);
+        expect(clock.revision, step[11]);
+        expect(clock.reason, step[12]);
+        if (actual.valid) {
+          expect(clock.serverNow, closeTo(step[8] as num, 1));
+          expect(actual.uncertainty, closeTo(step[9] as num, 0.001));
+          expect(actual.stability, closeTo(step[10] as num, 0.001));
+        }
+      }
     });
-
-    test('resets sample history on clockEpoch change', () {
-      final sync = ClockSync();
-      sync.addSample(
-        localSendAt: 1000,
-        serverReceivedAt: 2000,
-        serverSentAt: 2005,
-        serverProcessingMs: 5.0,
-        localReceiveAt: 1010,
-        clockEpoch: 'epoch-1',
-      );
-      sync.addSample(
-        localSendAt: 2000,
-        serverReceivedAt: 3000,
-        serverSentAt: 3005,
-        serverProcessingMs: 5.0,
-        localReceiveAt: 2010,
-        clockEpoch: 'epoch-1',
-      );
-      expect(sync.isSynchronized, isTrue);
-      expect(sync.sampleCount, equals(2));
-
-      // Server restarts and reports epoch-2
-      sync.addSample(
-        localSendAt: 3000,
-        serverReceivedAt: 3000,
-        serverSentAt: 3005,
-        serverProcessingMs: 5.0,
-        localReceiveAt: 3010,
-        clockEpoch: 'epoch-2',
-      );
-      expect(sync.clockEpoch, equals('epoch-2'));
-      expect(sync.sampleCount, equals(1));
-      expect(sync.isSynchronized, isFalse);
-    });
-
-    test('detects local wall-clock discontinuity and resets stale samples', () {
-      int monoNow = 1000;
-      final sync = ClockSync(monotonicNowMs: () => monoNow);
-
-      sync.addSample(
-        localSendAt: 1000,
-        serverReceivedAt: 2000,
-        serverSentAt: 2005,
-        serverProcessingMs: 5.0,
-        localReceiveAt: 1010,
-        clockEpoch: 'epoch-1',
-      );
-      monoNow = 2000;
-      sync.addSample(
-        localSendAt: 2000,
-        serverReceivedAt: 3000,
-        serverSentAt: 3005,
-        serverProcessingMs: 5.0,
-        localReceiveAt: 2010,
-        clockEpoch: 'epoch-1',
-      );
-      expect(sync.isSynchronized, isTrue);
-      expect(sync.sampleCount, 2);
-
-      // Monotonic clock advances 1000ms, but OS wall clock jumped forward by +5000ms (total +6000ms)
-      monoNow = 3000;
-      sync.addSample(
-        localSendAt: 8000,
-        serverReceivedAt: 4000,
-        serverSentAt: 4005,
-        serverProcessingMs: 5.0,
-        localReceiveAt: 8010,
-        clockEpoch: 'epoch-1',
-      );
-
-      expect(sync.sampleCount, 1);
-      expect(sync.isSynchronized, isFalse);
-      expect(sync.currentOffsetMs, closeTo(-4002.5, 0.1));
-    });
-
-    test('toServerTime, toLocalTime, and measurementFreshnessMs', () {
-      final sync = ClockSync();
-      sync.addSample(
-        localSendAt: 1000,
-        serverReceivedAt: 2000,
-        serverSentAt: 2000,
-        serverProcessingMs: 0.0,
-        localReceiveAt: 1000,
-        clockEpoch: 1,
-      );
-      sync.addSample(
-        localSendAt: 2000,
-        serverReceivedAt: 3000,
-        serverSentAt: 3000,
-        serverProcessingMs: 0.0,
-        localReceiveAt: 2000,
-        clockEpoch: 1,
-      );
-
-      expect(sync.currentOffsetMs, closeTo(1000.0, 0.01));
-      expect(sync.toServerTime(5000), equals(6000));
-      expect(sync.toLocalTime(6000), equals(5000));
-      expect(sync.measurementFreshnessMs(2350), equals(350));
-    });
-
-    test('exposes sampleCount and minRttMs diagnostic getters', () {
-      int mono = 1000;
-      final sync = ClockSync(monotonicNowMs: () => mono);
-      expect(sync.sampleCount, equals(0));
-      expect(sync.minRttMs, isNull);
-
-      sync.addSample(
-        localSendAt: 1000,
-        serverReceivedAt: 2000,
-        serverSentAt: 2005,
-        serverProcessingMs: 5.0,
-        localReceiveAt: 1090, // total 90ms - 5ms = 85ms RTT
-        clockEpoch: 'epoch-1',
-      );
-      expect(sync.sampleCount, equals(1));
-      expect(sync.minRttMs, closeTo(85.0, 0.01));
-
-      mono = 2045;
-      sync.addSample(
-        localSendAt: 2000,
-        serverReceivedAt: 3000,
-        serverSentAt: 3005,
-        serverProcessingMs: 5.0,
-        localReceiveAt: 2045, // total 45ms - 5ms = 40ms RTT
-        clockEpoch: 'epoch-1',
-      );
-      expect(sync.sampleCount, equals(2));
-      expect(sync.minRttMs, closeTo(40.0, 0.01));
-
-      mono = 3065;
-      sync.addSample(
-        localSendAt: 3000,
-        serverReceivedAt: 4000,
-        serverSentAt: 4005,
-        serverProcessingMs: 5.0,
-        localReceiveAt: 3065, // total 65ms - 5ms = 60ms RTT
-        clockEpoch: 'epoch-1',
-      );
-      expect(sync.sampleCount, equals(3));
-      expect(sync.minRttMs, closeTo(40.0, 0.01));
-    });
-
-    test('recovers immediately from >5000ms wall-clock step by clearing stale samples', () {
-      int mono = 1000;
-      final sync = ClockSync(monotonicNowMs: () => mono);
-      sync.addSample(
-        localSendAt: 1000,
-        serverReceivedAt: 2000,
-        serverSentAt: 2000,
-        serverProcessingMs: 0.0,
-        localReceiveAt: 1000,
-        clockEpoch: 'epoch-1',
-      );
-      mono = 2000;
-      sync.addSample(
-        localSendAt: 2000,
-        serverReceivedAt: 3000,
-        serverSentAt: 3000,
-        serverProcessingMs: 0.0,
-        localReceiveAt: 2000,
-        clockEpoch: 'epoch-1',
-      );
-      expect(sync.isSynchronized, isTrue);
-      expect(sync.sampleCount, equals(2));
-      expect(sync.currentOffsetMs, closeTo(1000.0, 0.01));
-
-      // Wall-clock step occurs: offset jumps from 1000ms to 8000ms (diff = 7000ms > 5000ms threshold)
-      mono = 3000;
-      sync.addSample(
-        localSendAt: 3000,
-        serverReceivedAt: 11000,
-        serverSentAt: 11000,
-        serverProcessingMs: 0.0,
-        localReceiveAt: 3000,
-        clockEpoch: 'epoch-1',
-      );
-
-      // Stale samples cleared immediately; snaps to new offset
-      expect(sync.sampleCount, equals(1));
-      expect(sync.isSynchronized, isFalse);
-      expect(sync.currentOffsetMs, closeTo(8000.0, 0.01));
-    });
+  }
+  test('reset fences outstanding clock exchanges; wall steps invalidate mapping', () {
+    var mono = 0, wall = 1700000000000;
+    final c = ClockSync(nowMs: () => wall, monotonicNowMs: () => mono);
+    final request = c.begin();
+    final timing = {'serverReceivedAt': wall, 'serverSentAt': wall, 'serverProcessingMs': 0, 'clockEpoch': 'a'};
+    expect(c.add(request, timing), true);
+    mono += 100;
+    wall += 5100;
+    expect(c.isSynchronized, false);
+    expect(c.add(request, timing), false);
   });
+  for (final scenario in traces['corrections'] as List) {
+    test('web converge/rest parity: ${scenario['name']}', () {
+      final c = DriftCorrection();
+      for (final step in scenario['steps'] as List) {
+        final input = step as List;
+        expect(
+          c.update(
+            now: input[0] as int,
+            error: (input[1] as num).toDouble(),
+            eligible: input[2] as bool,
+            context: input[3] as String,
+            uncertaintyMs: (input[4] as num).toDouble(),
+            stabilityMs: (input[5] as num).toDouble(),
+            frameSeconds: (input[6] as num).toDouble(),
+          ),
+          closeTo(step[7] as num, 0.000001),
+        );
+      }
+    });
+  }
 }

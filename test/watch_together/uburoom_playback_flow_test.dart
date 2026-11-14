@@ -99,14 +99,11 @@ void main() {
 
   setUp(() {
     clockSync = ClockSync();
-    clockSync.addSample(
-      localSendAt: 1000,
-      serverReceivedAt: 1005,
-      serverSentAt: 1005,
-      localReceiveAt: 1010,
-      serverProcessingMs: 0,
-      clockEpoch: 1,
-    );
+    clockSync.add(clockSync.begin(), {
+      'serverReceivedAt': clockSync.serverNow,
+      'serverSentAt': clockSync.serverNow,
+      'serverProcessingMs': 0, 'clockEpoch': 'fixture',
+    });
     socket = _TestSocket(clockSync: clockSync);
     auth = _FakeAuth();
     provider = WatchTogetherProvider(

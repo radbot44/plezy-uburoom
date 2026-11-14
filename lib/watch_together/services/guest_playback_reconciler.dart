@@ -3,12 +3,13 @@ import 'dart:math' as math;
 
 import '../../utils/app_logger.dart';
 import 'clock_sync.dart';
+import 'drift_correction.dart';
 import 'player_adapter.dart';
 import 'uburoom_socket_service.dart';
 
 /// Server-authoritative playback reconciler for an uburoom room viewer.
 /// Reconciles local [PlezyPlayerAdapter] against uburoom's timeline using
-/// an uncertainty-aware hysteresis proportional controller matching web viewers.
+/// the same uncertainty-aware converge-then-rest controller as web viewers.
 class GuestPlaybackReconciler {
   GuestPlaybackReconciler({
     required this.adapter,
@@ -39,16 +40,10 @@ class GuestPlaybackReconciler {
     caseSensitive: false,
   );
 
-  /// Proportional gain for micro-PLL rate adjustment (5% per 1000ms of drift,
-  /// reaching ±4.0% at 800ms drift).
-  static const double _kP = 0.00005;
-  static const double _minSlewDelta = 0.005;
-  static const double _maxSlewDelta = 0.04;
-  static const int _hardSeekThresholdMs = 2000;
-  static const int _passthroughSeekThresholdMs = 750;
-  static const int _passthroughSeekCooldownMs = 3000;
-  static const int _baseSeekCooldownMs = 1500;
-  static const int _maxSeekBackoffMs = 6000;
+  // Web client leaves errors above 650 ms to alignment seeks. Native seeks
+  // await landing via the adapter; do not issue another while one is pending.
+  static const int _hardSeekThresholdMs = 650;
+  final DriftCorrection _correction = DriftCorrection();
 
   final PlezyPlayerAdapter adapter;
   final ClockSync clockSync;
@@ -68,17 +63,16 @@ class GuestPlaybackReconciler {
   Timer? _startTimer;
 
   Map<String, dynamic>? _lastSnapshot;
-  int _snapshotServerTime = 0;
   String _epoch = '';
-  int _revision = 0;
   String _mediaVersion = '';
   String _streamVersion = '';
   String _observationEpoch = '';
   int _observationSequence = 0;
   double _lastSampleAt = 0.0;
-  int _frames = 0;
+
   int _discontinuity = 0;
   bool _observationPending = false;
+  int? _lastFrames;
   String _lastReportedState = 'paused';
 
   int _lastSyncQualitySentAt = 0;
@@ -88,17 +82,14 @@ class GuestPlaybackReconciler {
   int _startAt = 0;
   int _pauseAt = 0;
   bool _paused = true;
-  double _roomRate = 1.0;
+  static const double _roomRate = 1.0;
   bool _waitingForReady = false;
   dynamic _readinessVersion;
   bool _seekInFlight = false;
 
-  int _lastSeekAt = 0;
-  int _consecutiveJumpSeeks = 0;
   double _currentSlewRate = 1.0;
   bool _isSlewing = false;
-  int _slewDirection = 0;
-  int _outOfBandTicks = 0;
+
   bool _readySentForCurrentVersion = false;
   bool _disposed = false;
 
@@ -107,41 +98,25 @@ class GuestPlaybackReconciler {
   bool get waitingForReady => _waitingForReady;
   bool get isSlewing => _isSlewing;
   int get discontinuity => _discontinuity;
-  int get frames => _frames;
+
   String get observationEpoch => _observationEpoch;
   String get epoch => _epoch;
   String? get readinessVersion => _readinessVersion?.toString();
-
-  /// Uncertainty-aware entry threshold (in ms) before starting a rate slew.
-  double get enterSlewThresholdMs {
-    final uncertainty = clockSync.isSynchronized ? clockSync.uncertaintyMs : 50.0;
-    return (35.0 + uncertainty).clamp(50.0, 120.0);
-  }
-
-  /// Uncertainty-aware exit threshold (in ms) to restore nominal rate 1.0x.
-  double get exitSlewThresholdMs {
-    final uncertainty = clockSync.isSynchronized ? clockSync.uncertaintyMs : 50.0;
-    return (12.0 + 0.4 * uncertainty).clamp(15.0, 35.0);
-  }
 
   void updateRoomSnapshot(Map<String, dynamic> snapshot) {
     final prevPaused = _paused;
     final prevWaitingForReady = _waitingForReady;
 
     _lastSnapshot = snapshot;
-    _snapshotServerTime = (snapshot['serverNow'] as int?) ?? clockSync.serverNow;
 
-    final room = snapshot['room'] as Map<String, dynamic>? ?? snapshot;
-    final epochVal = snapshot['epoch'] ?? room['epoch'];
+    final epochVal = snapshot['epoch'];
     if (epochVal != null) {
       _epoch = epochVal.toString();
     }
-    _revision = room['revision'] as int? ?? _revision;
 
-    final newMediaVersion = (snapshot['mediaVersion'] ?? room['mediaVersion']) as String? ?? '';
-    final newStreamVersion = (snapshot['streamVersion'] ?? room['streamVersion']) as String? ?? '';
-    final newReadinessVersion =
-        snapshot['readinessVersion'] ?? (snapshot['readiness'] as Map<String, dynamic>?)?['version'];
+    final newMediaVersion = snapshot['mediaVersion'] as String? ?? '';
+    final newStreamVersion = snapshot['streamVersion'] as String? ?? '';
+    final newReadinessVersion = snapshot['readinessVersion'];
     final newWaitingForReady = snapshot['waitingForReady'] as bool? ?? false;
     final waitingTransition = !_waitingForReady && newWaitingForReady;
 
@@ -152,8 +127,9 @@ class GuestPlaybackReconciler {
       _mediaVersion = newMediaVersion;
       _streamVersion = newStreamVersion;
       _readinessVersion = newReadinessVersion;
+      _correction.reset();
+      _lastFrames = null;
       _readySentForCurrentVersion = false;
-      _consecutiveJumpSeeks = 0;
     } else {
       _mediaVersion = newMediaVersion;
       _streamVersion = newStreamVersion;
@@ -170,8 +146,7 @@ class GuestPlaybackReconciler {
     _pauseAt = snapshot['pauseAt'] as int? ?? 0;
 
     final stateObj = snapshot['state'] as Map<String, dynamic>?;
-    _paused = stateObj?['paused'] as bool? ?? (snapshot['paused'] as bool? ?? true);
-    _roomRate = (stateObj?['rate'] as num?)?.toDouble() ?? 1.0;
+    _paused = stateObj?['paused'] as bool? ?? true;
 
     _waitingForReady = newWaitingForReady;
 
@@ -185,10 +160,10 @@ class GuestPlaybackReconciler {
       _resetSlewIfNeeded();
       final targetPos = targetPositionMs;
       final drift = (adapter.positionMs - targetPos).abs();
-      if (drift > 250 && !_seekInFlight) {
+      if (drift > 650 && !_seekInFlight) {
         _seekInFlight = true;
         _discontinuity++;
-        _lastSeekAt = clockSync.serverNow;
+
         unawaited(
           adapter.seek(targetPos).whenComplete(() {
             _seekInFlight = false;
@@ -243,11 +218,9 @@ class GuestPlaybackReconciler {
 
     final targetPos = targetPositionMs;
     final driftMs = adapter.positionMs - targetPos;
-    final threshold = _readinessVersion != null ? 50 : 250;
+    const threshold = 50;
 
-    final now = clockSync.serverNow;
-    if (driftMs.abs() > threshold && !_seekInFlight && now - _lastSeekAt > 400) {
-      _lastSeekAt = now;
+    if (driftMs.abs() > threshold && !_seekInFlight) {
       _seekInFlight = true;
       _discontinuity++;
       unawaited(
@@ -259,13 +232,9 @@ class GuestPlaybackReconciler {
       return;
     }
 
-    final isLoaded =
-        (adapter.firstFrameShown || adapter.player.state.seekable || adapter.durationMs != null) &&
-        !adapter.isHeld &&
-        !adapter.buffering &&
-        !_seekInFlight;
+    final isLoaded = adapter.firstFrameShown && !adapter.isHeld && !adapter.buffering && !_seekInFlight;
 
-    if (isLoaded && driftMs.abs() <= 500) {
+    if (isLoaded && driftMs.abs() <= 50) {
       _readySentForCurrentVersion = true;
       unawaited(_sendReady());
     }
@@ -296,7 +265,7 @@ class GuestPlaybackReconciler {
     _startTimer?.cancel();
     _startTimer = null;
 
-    if (_paused || _waitingForReady) return;
+    if (_paused || _waitingForReady || !clockSync.isSynchronized) return;
 
     final serverNow = clockSync.serverNow;
     if (_startAt > serverNow) {
@@ -305,81 +274,43 @@ class GuestPlaybackReconciler {
         unawaited(adapter.pause());
       }
       _startTimer = Timer(Duration(milliseconds: waitMs), () {
-        if (!_disposed && !_paused && !_waitingForReady) {
+        if (!_disposed && !_paused && !_waitingForReady && clockSync.isSynchronized) {
           unawaited(adapter.play());
         }
       });
     }
   }
 
+  // timing.mjs target(): the server publishes an anchored position, never a
+  // continuously pushed playhead. Moving timelines require a valid mapping.
   int get targetPositionMs {
     final snapshot = _lastSnapshot;
-    if (snapshot == null) return math.max(0, _pauseAt);
-
-    final serverTime = clockSync.serverNow;
-    final stateObj = snapshot['state'] as Map<String, dynamic>?;
-    final bool isPaused = stateObj?['paused'] as bool? ?? _paused;
-    final double duration = (stateObj?['duration'] as num?)?.toDouble() ?? 0.0;
-    final bool hasStatePos = stateObj != null && stateObj['position'] is num;
-    final double statePosition = hasStatePos ? (stateObj['position'] as num).toDouble() : (_pauseAt / 1000.0);
-
-    final int? explicitServerNow = snapshot['serverNow'] as int?;
-    final int? startAt = snapshot['startAt'] as int?;
-
-    // When paused, the room timeline is anchored at statePosition (or pauseAt).
-    if (isPaused) {
-      if (hasStatePos) return math.max(0, (statePosition * 1000).round());
-      return math.max(0, _pauseAt);
+    if (snapshot == null) return 0;
+    final state = snapshot['state'] as Map<String, dynamic>? ?? const {};
+    final position = (state['position'] as num?)?.toDouble() ?? 0;
+    final duration = (state['duration'] as num?)?.toDouble() ?? 0;
+    double target = position;
+    if (state['paused'] != true && clockSync.isSynchronized) {
+      final anchor = snapshot['serverNow'] as num?;
+      if (anchor != null) {
+        num time = clockSync.serverNow;
+        final pauseAt = snapshot['pauseAt'] as num?;
+        if (pauseAt != null) time = math.min(time, pauseAt);
+        final startAt = snapshot['startAt'] as num?;
+        final elapsed = startAt != null ? math.max(0, time - math.max(anchor, startAt)) : time - anchor;
+        target += elapsed / 1000;
+      }
     }
-
-    // Active playback without explicit serverNow:
-    // If startAt is present and state.position was not explicitly provided, startAt is the t=0 epoch anchor.
-    if (explicitServerNow == null && !hasStatePos) {
-      final int anchorStart = startAt ?? _startAt;
-      if (serverTime < anchorStart) return 0;
-      return math.max(0, ((serverTime - anchorStart) * _roomRate).round());
-    }
-
-    // Otherwise anchor at explicit serverNow (or _snapshotServerTime when snapshot arrived).
-    final int anchorServerNow = explicitServerNow ?? _snapshotServerTime;
-    var effectiveServerTime = serverTime;
-    final int? pauseAt = snapshot['pauseAt'] as int?;
-    if (pauseAt != null && pauseAt > 0) {
-      effectiveServerTime = math.min(effectiveServerTime, pauseAt);
-    }
-
-    final int elapsedMs = startAt != null && startAt > 0
-        ? math.max(0, effectiveServerTime - math.max(anchorServerNow, startAt))
-        : math.max(0, effectiveServerTime - anchorServerNow);
-
-    final double targetSeconds = math.max(
-      0.0,
-      math.min(duration > 0 ? duration : double.infinity, statePosition + (elapsedMs * _roomRate) / 1000.0),
-    );
-
-    return (targetSeconds * 1000).round();
+    return (target.clamp(0, duration) * 1000).round();
   }
 
   void _resetSlewIfNeeded() {
     _isSlewing = false;
-    _slewDirection = 0;
-    _outOfBandTicks = 0;
+    _correction.reset();
     if (_currentSlewRate != 1.0 && adapter.canSetRate) {
       _currentSlewRate = 1.0;
       unawaited(adapter.setRate(_roomRate));
     }
-  }
-
-  double _computeProportionalSlewFactor(int driftMs) {
-    final absDrift = driftMs.abs();
-    // For >= 500ms drift, use full ±4% (1.04 / 0.96) for rapid convergence and test parity.
-    if (absDrift >= 500) {
-      return driftMs < 0 ? (1.0 + _maxSlewDelta) : (1.0 - _maxSlewDelta);
-    }
-    // Proportional taper between exitSlewThresholdMs and 500ms, quantized to 0.5% steps.
-    final rawDelta = (absDrift * _kP).clamp(_minSlewDelta, _maxSlewDelta);
-    final quantizedDelta = ((rawDelta * 200.0).round() / 200.0).clamp(_minSlewDelta, _maxSlewDelta);
-    return driftMs < 0 ? (1.0 + quantizedDelta) : (1.0 - quantizedDelta);
   }
 
   void _tick() {
@@ -393,10 +324,9 @@ class GuestPlaybackReconciler {
 
       final targetPos = targetPositionMs;
       final driftMs = adapter.positionMs - targetPos;
-      final threshold = _readinessVersion != null ? 50 : 250;
+      const threshold = 50;
 
-      if (driftMs.abs() > threshold && !_seekInFlight && now - _lastSeekAt > 400) {
-        _lastSeekAt = now;
+      if (driftMs.abs() > threshold && !_seekInFlight) {
         _seekInFlight = true;
         _discontinuity++;
         unawaited(
@@ -407,31 +337,45 @@ class GuestPlaybackReconciler {
         return;
       }
 
-      final isLoaded =
-          (adapter.firstFrameShown || adapter.player.state.seekable || adapter.durationMs != null) &&
-          !adapter.isHeld &&
-          !adapter.buffering &&
-          !_seekInFlight;
+      final isLoaded = adapter.firstFrameShown && !adapter.isHeld && !adapter.buffering && !_seekInFlight;
 
-      if (!_readySentForCurrentVersion && isLoaded && driftMs.abs() <= 500) {
+      if (!_readySentForCurrentVersion && isLoaded && driftMs.abs() <= 50) {
         _readySentForCurrentVersion = true;
         unawaited(_sendReady());
       }
       return;
     }
 
-    if (_startAt > now) return;
+    if (!_paused && !clockSync.isSynchronized) {
+      // Match web: a pending scheduled start holds; already-running playback
+      // continues at nominal rate until a usable clock returns.
+      if (_startAt > (_lastSnapshot?['serverNow'] as num? ?? 0) && !adapter.paused) {
+        unawaited(adapter.pause());
+      }
+      _resetSlewIfNeeded();
+      return;
+    }
+    if (_startAt > now) {
+      _handleStartCountdown();
+      return;
+    }
 
     final targetPos = targetPositionMs;
     final currentPos = adapter.positionMs;
     final driftMs = currentPos - targetPos;
     final absDrift = driftMs.abs();
 
-    if (_paused) {
+    if (adapter.player.state.completed &&
+        currentPos >= (adapter.durationMs ?? 0) - 500 &&
+        targetPos >= (adapter.durationMs ?? 0) - 500) {
+      _resetSlewIfNeeded();
+      return;
+    }
+
+    if (_paused || (_pauseAt > 0 && now >= _pauseAt)) {
       if (!adapter.paused) unawaited(adapter.pause());
       _resetSlewIfNeeded();
-      if (absDrift > 500 && now - _lastSeekAt > _baseSeekCooldownMs && !_seekInFlight) {
-        _lastSeekAt = now;
+      if (absDrift > 650 && !_seekInFlight) {
         _seekInFlight = true;
         _discontinuity++;
         unawaited(
@@ -447,13 +391,10 @@ class GuestPlaybackReconciler {
       unawaited(adapter.play());
     }
 
-    // Large drift (> 2000ms): guarded jump seek with exponential retry backoff.
+    // Web alignment threshold: errors above 650 ms require a local seek.
     if (absDrift > _hardSeekThresholdMs) {
-      final seekCooldown = math.min(_maxSeekBackoffMs, _baseSeekCooldownMs * (1 << math.min(2, _consecutiveJumpSeeks)));
-      if (now - _lastSeekAt > seekCooldown && !adapter.buffering && !adapter.isHeld && !_seekInFlight) {
-        _lastSeekAt = now;
+      if (!adapter.buffering && !adapter.isHeld && !_seekInFlight) {
         _seekInFlight = true;
-        _consecutiveJumpSeeks++;
         _discontinuity++;
         _resetSlewIfNeeded();
         unawaited(
@@ -465,93 +406,75 @@ class GuestPlaybackReconciler {
       return;
     }
 
-    // When audio passthrough locks the sample clock (!adapter.canSetRate),
-    // micro-PLL slewing is unavailable. Use a tighter guarded seek fallback
-    // (750ms after 2 consecutive ticks) so viewers don't sit out of sync up to 2000ms.
-    if (!adapter.canSetRate) {
-      _consecutiveJumpSeeks = 0;
-      if (absDrift > _passthroughSeekThresholdMs) {
-        _outOfBandTicks++;
-        if (_outOfBandTicks >= 2 &&
-            now - _lastSeekAt > _passthroughSeekCooldownMs &&
-            !adapter.buffering &&
-            !adapter.isHeld &&
-            !_seekInFlight) {
-          _lastSeekAt = now;
-          _seekInFlight = true;
-          _outOfBandTicks = 0;
-          _discontinuity++;
-          unawaited(
-            adapter.seek(targetPos).whenComplete(() {
-              _seekInFlight = false;
-            }),
-          );
-        }
-      } else {
-        _outOfBandTicks = 0;
-      }
-      return;
-    }
-
-    // Once inside 2000ms, any prior jump seek succeeded in entering the slew capture range.
-    _consecutiveJumpSeeks = 0;
-
-    final exitThresh = exitSlewThresholdMs;
-    final enterThresh = enterSlewThresholdMs;
-    final currentSign = driftMs == 0 ? 0 : (driftMs < 0 ? -1 : 1);
-
-    // Exit slewing when within tight exit threshold OR when we crossed zero (overshot target).
-    if (_isSlewing) {
-      final crossedZero = _slewDirection != 0 && currentSign != 0 && currentSign != _slewDirection;
-      if (absDrift <= exitThresh || crossedZero) {
-        _resetSlewIfNeeded();
-        return;
-      }
-    } else {
-      if (absDrift <= enterThresh) {
-        _outOfBandTicks = 0;
-        _resetSlewIfNeeded();
-        return;
-      }
-      // Require 2 consecutive ticks for mild drift (< 250ms) to filter transient frame jitter,
-      // or enter immediately when drift >= 250ms.
-      _outOfBandTicks++;
-      if (absDrift < 250 && _outOfBandTicks < 2) {
-        return;
-      }
-      _isSlewing = true;
-      _slewDirection = currentSign;
-    }
-
-    if (adapter.canSetRate) {
-      final double slewFactor = _computeProportionalSlewFactor(driftMs);
-      final double targetSlew = _roomRate * slewFactor;
-      if ((_currentSlewRate - slewFactor).abs() > 0.002) {
-        _currentSlewRate = slewFactor;
-        unawaited(adapter.setRate(targetSlew));
-      }
+    final timing = clockSync.read();
+    final factor = _correction.update(
+      now: clockSync.monotonicNow,
+      error: -driftMs / 1000.0,
+      eligible:
+          timing.valid &&
+          adapter.canSetRate &&
+          !adapter.paused &&
+          !adapter.buffering &&
+          !adapter.isHeld &&
+          !_seekInFlight &&
+          adapter.firstFrameShown &&
+          (_bufferAhead == null || _bufferAhead! >= 1),
+      context: '$_epoch:$_mediaVersion:$_streamVersion:$_readinessVersion:${clockSync.revision}',
+      uncertaintyMs: timing.uncertainty,
+      stabilityMs: timing.stability,
+    );
+    _isSlewing = factor != 1;
+    if (_currentSlewRate != factor && adapter.canSetRate) {
+      _currentSlewRate = factor;
+      unawaited(adapter.setRate(factor));
     }
   }
 
-  void _dispatchObservation() {
+  double? get _bufferAhead {
+    final state = adapter.player.state;
+    if (state.bufferRanges.isEmpty && state.buffer == Duration.zero) return null;
+    final position = adapter.player.currentPosition;
+    double ahead = math.max(0, (adapter.player.state.buffer - position).inMilliseconds / 1000.0);
+    for (final range in adapter.player.state.bufferRanges) {
+      if (position >= range.start && position <= range.end) {
+        ahead = math.max(ahead, (range.end - position).inMilliseconds / 1000.0);
+      }
+    }
+    return ahead;
+  }
+
+  Future<void> _dispatchObservation() async {
     if (_disposed || !socketService.isConnected) return;
     if (_mediaVersion.isEmpty || _streamVersion.isEmpty || _observationEpoch.isEmpty) return;
     if (_observationPending) return;
 
-    final state = _currentState;
-    final nowMs = DateTime.now().millisecondsSinceEpoch.toDouble();
-    final sampleAt = nowMs > _lastSampleAt ? nowMs : (_lastSampleAt + 1.0);
-    final elapsedMs = _lastSampleAt > 0 ? (sampleAt - _lastSampleAt) : 1000.0;
-    _lastSampleAt = sampleAt;
-
-    if (state == 'playing' && !adapter.buffering && !adapter.paused) {
-      final deltaFrames = math.max(1, ((elapsedMs / 1000.0) * 24.0 * _roomRate).round());
-      _frames += deltaFrames;
+    _observationPending = true;
+    final context = '$_mediaVersion:$_streamVersion:$_observationEpoch';
+    int frames = 0;
+    try {
+      // Android ExoPlayer's existing stats bridge exposes DecoderCounters.
+      // mpv's estimated-frame-number/count are position estimates, not evidence.
+      final stats = await adapter.player.getStats();
+      final rendered = stats['videoRenderedFrames'];
+      if (rendered is int && rendered >= 0) frames = rendered;
+    } catch (_) {
+      // Backends without a real counter explicitly report no decode evidence.
     }
+    if (_disposed || adapter.isReleased || context != '$_mediaVersion:$_streamVersion:$_observationEpoch') {
+      _observationPending = false;
+      return;
+    }
+    if (_lastFrames != null && frames < _lastFrames!) _discontinuity++;
+    _lastFrames = frames;
+    final state = _currentState;
+    final nowMs = clockSync.monotonicNow.toDouble();
+    final sampleAt = nowMs > _lastSampleAt ? nowMs : (_lastSampleAt + 1.0);
+    _lastSampleAt = sampleAt;
+    // Zero is a valid observation, but cannot earn decode-backed watch credit.
 
     final observedAt = clockSync.serverNow;
     final double positionSeconds = adapter.positionMs / 1000.0;
-    final double rate = adapter.canSetRate ? (_currentSlewRate * _roomRate) : 1.0;
+    final double rate = adapter.player.state.rate;
     final sequence = ++_observationSequence;
 
     final data = <String, dynamic>{
@@ -564,12 +487,11 @@ class GuestPlaybackReconciler {
       'observedAt': observedAt,
       'position': positionSeconds,
       'rate': rate,
-      'frames': _frames,
+      'frames': frames,
       'discontinuity': _discontinuity,
       'state': state,
     };
 
-    _observationPending = true;
     unawaited(
       socketService
           .observe(roomId, viewerId, data)
@@ -629,6 +551,11 @@ class GuestPlaybackReconciler {
       score: score,
       confidence: confidence,
       measurementFreshnessMs: clockSync.measurementFreshnessMs(now),
+      health: {
+        if (_bufferAhead case final double ahead) 'bufferAhead': ahead.clamp(0, 3600),
+        if (clockSync.isSynchronized) 'offsetMs': driftMs.clamp(-86400000, 86400000),
+        if (_lastSnapshot?['quality'] is String) 'quality': _lastSnapshot!['quality'],
+      },
     );
   }
 
