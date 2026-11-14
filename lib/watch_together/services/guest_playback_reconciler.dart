@@ -190,6 +190,7 @@ class GuestPlaybackReconciler {
   void _onPlayerStateEvent(String event) {
     if (_disposed) return;
     final newState = _currentState;
+    if (newState == 'paused' || newState == 'buffering' || newState == 'ended') _resetSlewIfNeeded();
     if (_lastReportedState != newState) {
       // Natural EOF transition playing -> ended does NOT increment discontinuity
       if (newState != 'ended' &&
@@ -275,6 +276,10 @@ class GuestPlaybackReconciler {
       }
       _startTimer = Timer(Duration(milliseconds: waitMs), () {
         if (!_disposed && !_paused && !_waitingForReady && clockSync.isSynchronized) {
+          if (clockSync.serverNow < _startAt) {
+            _handleStartCountdown();
+            return;
+          }
           unawaited(adapter.play());
         }
       });
@@ -419,7 +424,8 @@ class GuestPlaybackReconciler {
           !_seekInFlight &&
           adapter.firstFrameShown &&
           (_bufferAhead == null || _bufferAhead! >= 1),
-      context: '$_epoch:$_mediaVersion:$_streamVersion:$_readinessVersion:${clockSync.revision}',
+      context:
+          '$_epoch:$_mediaVersion:$_streamVersion:${_lastSnapshot?['revision']}:$_startAt:$_pauseAt:$_readinessVersion:${clockSync.revision}',
       uncertaintyMs: timing.uncertainty,
       stabilityMs: timing.stability,
     );

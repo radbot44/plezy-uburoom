@@ -809,6 +809,29 @@ void main() {
         expect(reconciler.isSlewing, isTrue);
         expect(rates.last, greaterThan(1.0));
 
+        // A timeline revision changes the web controller's context, even with
+        // the same media/stream: a small shared seek must restart persistence.
+        reconciler.updateRoomSnapshot({
+          'epoch': 1,
+          'revision': 2,
+          'mediaVersion': 'mv-1',
+          'streamVersion': 'sv-1',
+          'serverNow': clockSync.serverNow,
+          'startAt': clockSync.serverNow,
+          'state': {
+            'paused': false,
+            'position': player.currentPosition.inMilliseconds / 1000.0 + 0.2,
+            'duration': 7200.0,
+          },
+        });
+        async.elapse(const Duration(milliseconds: 100));
+        async.flushMicrotasks();
+        expect(reconciler.isSlewing, false);
+        expect(rates.last, 1.0);
+        async.elapse(const Duration(milliseconds: 550));
+        async.flushMicrotasks();
+        expect(reconciler.isSlewing, true);
+
         // Disposing while slewing must immediately restore rate to 1.0
         advance.cancel();
         reconciler.dispose();
