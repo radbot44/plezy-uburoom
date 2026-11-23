@@ -14,7 +14,7 @@ enum UburoomConnectionState { disconnected, connecting, authenticating, connecte
 
 /// The room protocol version this client speaks (uburoom `docs/wire-protocol.md`,
 /// `shared/wire-protocol.js`). The server refuses any other in the handshake.
-const int uburoomProtocolVersion = 2;
+const int uburoomProtocolVersion = 3;
 
 /// The server speaks another protocol version; only updating the app (or the
 /// server) helps, so the socket does not retry.
